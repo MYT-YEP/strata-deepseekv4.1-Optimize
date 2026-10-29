@@ -1,0 +1,4 @@
+# Preserve exact snapshot bytes and checksums on Windows and other systems.
+* -text
+*.bin binary
+*.png binary

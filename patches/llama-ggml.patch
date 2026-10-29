@@ -1,0 +1,1434 @@
+diff --git a/ggml/include/ggml-cuda.h b/ggml/include/ggml-cuda.h
+index 1cd81eeaebcdf4abcd46c87ba1a9a46e275aa12b..516aaccd5cdf00377447e581f16b0f4f3031b709 100644
+--- a/ggml/include/ggml-cuda.h
++++ b/ggml/include/ggml-cuda.h
+@@ -24,6 +24,14 @@ GGML_BACKEND_API ggml_backend_t ggml_backend_cuda_init(int device);
+ 
+ GGML_BACKEND_API bool ggml_backend_is_cuda(ggml_backend_t backend);
+ 
++// xolotl: drop every CUDA graph this backend has cached.  A cached graph's kernels point at the buffers of the ggml
++// context that built it.  When a caller frees that context and builds a new one of the same size (the GLM engine
++// does this when its one fixed graph pool fills up), the new context and its buffers land at the same addresses,
++// the cache key (cgraph->nodes[0]) collides, and the next compute replays a stale executable against freed memory:
++// "ds4_moe: chunk sync: an illegal memory access was encountered" and a SIGSEGV in ggml_backend_cuda_graph_compute.
++// Call this before freeing the context.  No-op when the backend is not CUDA.
++GGML_BACKEND_API void ggml_backend_cuda_graph_cache_clear(ggml_backend_t backend);
++
+ // device buffer
+ GGML_BACKEND_API ggml_backend_buffer_type_t ggml_backend_cuda_buffer_type(int device);
+ 
+diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
+index d62a631043a3745882dba3333004cb92cb75a7c6..643e733905542e218f4e7e81cb5d8d195ae10516 100644
+--- a/ggml/include/ggml.h
++++ b/ggml/include/ggml.h
+@@ -586,6 +586,8 @@ extern "C" {
+         GGML_OP_DSV4_HC_PRE,
+         GGML_OP_DSV4_HC_POST,
+         GGML_OP_TOP_K_MASK,
++        GGML_OP_DSV41_FAKE_QUANT,
++        GGML_OP_DSV41_HC_MIXES,
+ 
+         GGML_OP_UNARY,
+ 
+@@ -2683,7 +2685,8 @@ extern "C" {
+     // q:       [n_embd_idx, n_head_idx, n_batch, ne3 ]
+     // k:       [n_embd_idx, 1,          n_kv,    ne3 ]
+     // weights: [n_head_idx, n_batch,    1,       ne3 ] !! prescaled !!
+-    // mask:    [n_kv,       n_batch,    1,       ne33] !! f16 !!
++    // mask:    [n_kv,       n_batch,    1,       ne33] f16 additive mask, or
++    //          [1,          n_batch,    1,       ne33] f32 visible-key counts (key i visible iff i < count)
+     // res:     [n_kv,       n_batch,    1,       ne3 ]
+     //
+     // broadcast:
+@@ -2765,6 +2768,29 @@ extern "C" {
+             struct ggml_tensor  * blocks,
+             struct ggml_tensor  * extra);
+ 
++    // Strata-DS4: DeepSeek-V4.1's activation quantize-dequantize (model.py act_quant / fp4_act_quant) in one op, the
++    // same values as the stock-op composite tools/v41/engine/ds41_ops.hpp ds41_fake_quant builds (bit for bit on CUDA):
++    //   mode 0: FP8 E4M3, blocks of 32, power-of-two scale     mode 1: FP4 E2M1, blocks of 16, E4M3 scale
++    //   mode 2: FP4 E2M1, blocks of 32, power-of-two scale
++    // a: F32, contiguous, ggml_nelements(a) % block == 0; result: a's shape
++    GGML_API struct ggml_tensor * ggml_dsv41_fake_quant(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * a,
++            int                   mode);
++
++    // Strata-DS4: the HC pre/post mixes of one model.py Block.hc_mixes in ONE op - the same values as the stock-op
++    // composite tools/v41/engine/ds41_dense.cpp hc_mixes builds (mul, add, sigmoid, ggml_scale / ggml_scale_bias), bit for
++    // bit on CUDA and CPU.  Replaces 4 nodes per mix with 1: 16 of every layer's ~82 tiny kernels.
++    //   mixes: F32 [2*hc, n_tokens] contiguous   scale: F32 [2]   base: F32 [2*hc]   result: F32 [hc, 2*n_tokens]
++    //   result[h, t]        = sigmoid(mixes[h,      t]*scale[0] + base[h])      * 1 + eps   (the pre mix)
++    //   result[h, nt + t]   = sigmoid(mixes[hc + h, t]*scale[1] + base[hc + h]) * 2 + 0     (the post mix)
++    GGML_API struct ggml_tensor * ggml_dsv41_hc_mixes(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * mixes,
++            struct ggml_tensor  * scale,
++            struct ggml_tensor  * base,
++            float                 eps);
++
+     // custom operators
+ 
+     typedef void (*ggml_custom1_op_t)(struct ggml_tensor * dst , const struct ggml_tensor * a, int ith, int nth, void * userdata);
+diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
+index fb35be352aed3f1cd330b92bd5c48de0def7ca37..b3ad5d4fbdfbf9848691161ebdb1e70b8fbbd73a 100644
+--- a/ggml/src/ggml-backend-meta.cpp
++++ b/ggml/src/ggml-backend-meta.cpp
+@@ -1047,7 +1047,9 @@ static struct ggml_backend_meta_split_state ggml_backend_meta_get_split_state(
+             case GGML_OP_DSV4_HC_COMB:
+             case GGML_OP_DSV4_HC_PRE:
+             case GGML_OP_DSV4_HC_POST:
+-            case GGML_OP_TOP_K_MASK: {
++            case GGML_OP_TOP_K_MASK:
++            case GGML_OP_DSV41_FAKE_QUANT:
++            case GGML_OP_DSV41_HC_MIXES: {
+                 split_state = handle_generic(src_ss, /*scalar_only =*/ true);
+             } break;
+             case GGML_OP_UNARY: {
+diff --git a/ggml/src/ggml-cpu/ggml-cpu.c b/ggml/src/ggml-cpu/ggml-cpu.c
+index 53d39d2491edca865a149b250c96c7970e0feeb0..dd38a65c7b2b5bd6df7308958ffc2c2df03e6047 100644
+--- a/ggml/src/ggml-cpu/ggml-cpu.c
++++ b/ggml/src/ggml-cpu/ggml-cpu.c
+@@ -2114,6 +2114,14 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
+             {
+                 ggml_compute_forward_top_k_mask(params, tensor);
+             } break;
++        case GGML_OP_DSV41_FAKE_QUANT:
++            {
++                ggml_compute_forward_dsv41_fake_quant(params, tensor);
++            } break;
++        case GGML_OP_DSV41_HC_MIXES:
++            {
++                ggml_compute_forward_dsv41_hc_mixes(params, tensor);
++            } break;
+         case GGML_OP_MAP_CUSTOM1:
+             {
+                 ggml_compute_forward_map_custom1(params, tensor);
+@@ -2298,6 +2306,8 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
+         case GGML_OP_DSV4_HC_PRE:
+         case GGML_OP_DSV4_HC_POST:
+         case GGML_OP_TOP_K_MASK:
++        case GGML_OP_DSV41_FAKE_QUANT:
++        case GGML_OP_DSV41_HC_MIXES:
+             {
+                 n_tasks = n_threads;
+             } break;
+diff --git a/ggml/src/ggml-cpu/ops.cpp b/ggml/src/ggml-cpu/ops.cpp
+index 5735f96f8e8b992c7fd66b2e63b3611a791c4920..2231740f4946eb811a3627dede1962b2bf8664dd 100644
+--- a/ggml/src/ggml-cpu/ops.cpp
++++ b/ggml/src/ggml-cpu/ops.cpp
+@@ -12545,7 +12545,7 @@ void ggml_compute_forward_lightning_indexer(
+     GGML_ASSERT(dst->type  == GGML_TYPE_F32);
+     GGML_ASSERT(   q->type == GGML_TYPE_F32);
+     GGML_ASSERT(   w->type == GGML_TYPE_F32);
+-    GGML_ASSERT(   m->type == GGML_TYPE_F16);
++    GGML_ASSERT(   m->type == GGML_TYPE_F16 || m->type == GGML_TYPE_F32);
+ 
+     GGML_TENSOR_LOCALS(int64_t, neq,  q, ne)
+     GGML_TENSOR_LOCALS(size_t,  nbq,  q, nb)
+@@ -12592,7 +12592,12 @@ void ggml_compute_forward_lightning_indexer(
+             const float       *   w_row =       (float *) ((char *)   w->data + t*nbw1 +        s*nbw3);
+             const ggml_fp16_t *   m_row = (ggml_fp16_t *) ((char *)   m->data + t*nbm1 + (s%nem3)*nbm3);
+             float             * dst_row =       (float *) ((char *) dst->data + t*nb1  +        s*nb3 );
++            const float nvis = m->type == GGML_TYPE_F32 ? *(const float *) m_row : INFINITY;
+             for (int ik = ir0; ik < ir1; ++ik) {
++                if (!(ik < nvis)) {
++                    dst_row[ik] = -INFINITY;
++                    continue;
++                }
+                 char * k_row = (char *) k->data + ik*nbk2 + s*nbk3;
+                 if (k_to_float) {
+                     k_to_float(k_row, k_row_f32, n_embd);
+@@ -12609,8 +12614,97 @@ void ggml_compute_forward_lightning_indexer(
+                     score += MAX(qk, 0.0f) * w_row[h];
+                 }
+                 // apply mask
+-                dst_row[ik] = score + GGML_CPU_FP16_TO_FP32(m_row[ik]);
++                dst_row[ik] = score + (m->type == GGML_TYPE_F32 ? 0.0f : GGML_CPU_FP16_TO_FP32(m_row[ik]));
+             }
+         }
+     }
+ }
++
++// ggml_compute_forward_dsv41_fake_quant (Strata-DS4): DeepSeek-V4.1's activation quantize-dequantize, the same steps as
++// tools/v41/engine/ds41_ops.hpp (exact float tricks: Veltkamp power-of-two split, round-half-even by 1.5 * 2^23)
++
++static inline float dsv41_pow2_ceil(float a) {
++    // volatile: the split needs the ROUNDED product - contracted into fma(-a, c, a) (GNU mode, -march=native) it is
++    // not a split at all
++    const volatile float g = a * 8388609.0f;
++    const float hi = g + (a - g);
++    return hi * ((a - hi > 0.0f ? 1.0f : 0.0f) + 1.0f);
++}
++
++static inline float dsv41_pow2_floor(float a) {
++    const float f = dsv41_pow2_ceil(a);
++    return f * ((f - a > 0.0f ? 1.0f : 0.0f) * -0.5f + 1.0f);
++}
++
++static inline float dsv41_round_fmt(float v, int mbits, float min_normal) {
++    const float p = fminf(fmaxf(dsv41_pow2_floor(fabsf(v)), min_normal), INFINITY);
++    const float k = (float) (1 << mbits);
++    const float C = 12582912.0f;
++    const float y = (v / p) * k;
++    const volatile float yc = y + C;   // round half to even: the add must round on its own
++    const float r = yc - C;
++    return (r * (1.0f / k)) * p;
++}
++
++void ggml_compute_forward_dsv41_fake_quant(const ggml_compute_params * params, ggml_tensor * dst) {
++    const ggml_tensor * src0 = dst->src[0];
++    GGML_ASSERT(src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 && ggml_is_contiguous(src0));
++    const int mode = ggml_get_op_params_i32(dst, 0);
++    const int bs = mode == 1 ? 16 : 32;
++    const bool fp8 = mode == 0;
++    const float maxv = fp8 ? 448.0f : 6.0f;
++    const float floor_ = fp8 ? 1e-4f : mode == 1 ? 6.0f / 512.0f : 6.0f * 0x1p-126f;
++    const int64_t nb = ggml_nelements(src0) / bs;
++    const int64_t b0 = nb * params->ith / params->nth, b1 = nb * (params->ith + 1) / params->nth;
++    const float * x = (const float *) src0->data;
++    float * y = (float *) dst->data;
++    for (int64_t b = b0; b < b1; ++b) {
++        float amax = -FLT_MAX;
++        for (int i = 0; i < bs; ++i) amax = fmaxf(amax, fabsf(x[b * bs + i]));
++        const float t = fminf(fmaxf(amax, floor_), INFINITY) / maxv;
++        const float s = mode == 1 ? dsv41_round_fmt(t, 3, 0x1p-6f) : dsv41_pow2_ceil(t);
++        for (int i = 0; i < bs; ++i) {
++            const float v = fminf(fmaxf(x[b * bs + i] / s, -maxv), maxv);
++            const float q = fp8 ? dsv41_round_fmt(v, 3, 0x1p-6f) : dsv41_round_fmt(v, 1, 1.0f);
++            y[b * bs + i] = q * s;
++        }
++    }
++}
++
++// ggml_compute_forward_dsv41_hc_mixes (Strata-DS4): the two HC mixes of one model.py Block.hc_mixes.  The same steps,
++// in the same order, as the engine's stock-op composite (ggml_compute_forward_mul -> ggml_vec_mul_f32,
++// ggml_compute_forward_add -> ggml_vec_add_f32, ggml_compute_forward_sigmoid -> ggml_vec_sigmoid_f32,
++// ggml_compute_forward_scale -> ggml_vec_scale_f32 / ggml_vec_mad1_f32): one plain product, one plain sum (volatile:
++// the product must round on its own, GNU mode contracts a*b+c into fma and the composite is two ops), the sigmoid, and
++// s*1 + eps / s*2 + 0 (exactly the scale the composite applies, `fma(x, 1, eps)` == `x + eps`).
++void ggml_compute_forward_dsv41_hc_mixes(const ggml_compute_params * params, ggml_tensor * dst) {
++    const ggml_tensor * mixes = dst->src[0];
++    const ggml_tensor * scale = dst->src[1];
++    const ggml_tensor * base  = dst->src[2];
++    GGML_ASSERT(mixes->type == GGML_TYPE_F32 && ggml_is_contiguous(mixes));
++    GGML_ASSERT(scale->type == GGML_TYPE_F32 && ggml_nelements(scale) == 2);
++    GGML_ASSERT(base->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
++    GGML_ASSERT(mixes->ne[0] >= 2 * (base->ne[0] / 2));
++    const int64_t hc = base->ne[0] / 2;
++    const int64_t nt = dst->ne[1] / 2;
++    const int64_t nrow = mixes->ne[0];   // 2*hc; a Block.hc_mixes mixes tensor carries the comb rows after them
++    const float   eps = ggml_get_op_params_f32(dst, 0);
++    const float * mx = (const float *) mixes->data;
++    const float * sc = (const float *) scale->data;
++    const float * bs = (const float *) base->data;
++    float * y = (float *) dst->data;
++    const int64_t n = 2*hc*nt;
++    const int64_t i0 = n * params->ith / params->nth;
++    const int64_t i1 = n * (params->ith + 1) / params->nth;
++    for (int64_t i = i0; i < i1; ++i) {
++        const int64_t h    = i % hc;
++        const int64_t col  = i / hc;
++        const bool    post = col >= nt;
++        const int64_t t    = post ? col - nt : col;
++        const int64_t r    = post ? hc + h : h;
++        const volatile float t0 = mx[r + nrow*t] * sc[post ? 1 : 0];
++        const float t1 = t0 + bs[r];
++        const float s  = 1.0f / (1.0f + expf(-t1));
++        y[i] = post ? s * 2.0f : s + eps;
++    }
++}
+diff --git a/ggml/src/ggml-cpu/ops.h b/ggml/src/ggml-cpu/ops.h
+index 00a2ea7dc2de960849f9f05079cd9fd1eaccdee5..b409817df0507f5418000f4212f88e4ab905fb72 100644
+--- a/ggml/src/ggml-cpu/ops.h
++++ b/ggml/src/ggml-cpu/ops.h
+@@ -109,6 +109,8 @@ void ggml_compute_forward_dsv4_hc_comb(const struct ggml_compute_params * params
+ void ggml_compute_forward_dsv4_hc_pre(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_dsv4_hc_post(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_top_k_mask(const struct ggml_compute_params * params, struct ggml_tensor * dst);
++void ggml_compute_forward_dsv41_fake_quant(const struct ggml_compute_params * params, struct ggml_tensor * dst);
++void ggml_compute_forward_dsv41_hc_mixes(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_map_custom1(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_map_custom2(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_map_custom3(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+diff --git a/ggml/src/ggml-cuda/argsort.cu b/ggml/src/ggml-cuda/argsort.cu
+index 101afeba2861a88c6669bf59fe7aac4f61bed754..9f9ae4339ecfb1aa837405b05496905bb0858df2 100644
+--- a/ggml/src/ggml-cuda/argsort.cu
++++ b/ggml/src/ggml-cuda/argsort.cu
+@@ -227,6 +227,143 @@ static __global__ void k_argsort_f32_i32(const float * x, int * dst, const int n
+     }
+ }
+ 
++// Strata-DS4 (tools/v41/ggml/rank-argsort.patch): a row of <= 1024 columns sorted by RANK instead of the bitonic
++// network below.  Each thread owns a column, counts the columns that sort before it (value order, equal values by
++// ascending column) and writes itself at that rank: one pass over shared memory, one barrier.  The bitonic network
++// takes 45 barrier steps for 384 -> 512 columns and reads x from global memory per compare: 9 us per 384-wide row on
++// a 4090, and DeepSeek-V4.1 decode runs ~80 of them per token (router top-6 + prefetch top-16).  Equal values come out
++// in ascending column order (the network leaves their order to its wiring).  Keys are the float bits mapped to an
++// order-preserving uint (-0.0 before +0.0, NaNs at the ends), so the ranks always form a permutation.
++// GGML_CUDA_RANK_ARGSORT=0 restores the bitonic kernel.
++template<ggml_sort_order order>
++static __global__ void k_argsort_rank_f32_i32(const float * __restrict__ x, int * __restrict__ dst, const int ncols,
++                                              const int ncols4) {
++    extern __shared__ uint4 s_key4[];   // ncols rounded up to 4
++    unsigned * s_key = (unsigned *) s_key4;
++    const int64_t row = blockIdx.x;
++    const float * x_row = x + row * ncols;
++    for (int c = threadIdx.x; c < ncols4; c += blockDim.x) {
++        unsigned k = 0xFFFFFFFFu;   // padding: never before a real column (not smaller, and after it in column order)
++        if (c < ncols) {
++            const unsigned u = __float_as_uint(x_row[c]);
++            k = (u & 0x80000000u) ? ~u : (u | 0x80000000u);   // unsigned order = float order
++            if (order == GGML_SORT_ORDER_DESC) {
++                k = ~k;                                     // "sorts first" = "smaller key" in both orders
++            }
++        }
++        s_key[c] = k;
++    }
++    __syncthreads();
++    for (int e = threadIdx.x; e < ncols; e += blockDim.x) {
++        const unsigned ke = s_key[e];
++        int r = 0;
++        for (int f4 = 0; f4 < ncols4 / 4; ++f4) {
++            const uint4 k4 = s_key4[f4];
++            const int f = 4 * f4;
++            r += (k4.x < ke) | ((k4.x == ke) & (f + 0 < e));
++            r += (k4.y < ke) | ((k4.y == ke) & (f + 1 < e));
++            r += (k4.z < ke) | ((k4.z == ke) & (f + 2 < e));
++            r += (k4.w < ke) | ((k4.w == ke) & (f + 3 < e));
++        }
++        dst[row * ncols + r] = e;
++    }
++}
++
++// Strata-DS4 (tools/v41/ggml/rank-argsort.patch): ggml_argsort_top_k records k in op_params[1] (only the first k
++// columns of each sorted row are read through its view).  For k <= 32 of a row of <= 1024 one warp per row selects
++// them directly: each lane holds its columns' keys (column lane + 32 i) as 64-bit (key << 32 | column) composites in
++// registers, then k rounds of a 5-step shuffle minimum, the winning lane rescanning only its own columns.  The same
++// first k as the rank kernel / a stable sort (value order, equal values by ascending column), ~1 us instead of a
++// full sort of the row.  GGML_CUDA_RANK_ARGSORT=0 restores the bitonic kernel for every argsort.
++template<ggml_sort_order order, int NPL>   // NPL: columns per lane, >= ceil(ncols / 32)
++static __global__ void k_argsort_topk_warp_f32_i32(const float * __restrict__ x, int * __restrict__ dst, const int ncols,
++                                                   const int k, const int nrows) {
++    const int row = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32;
++    if (row >= nrows) {
++        return;
++    }
++    const int lane = threadIdx.x & 31;
++    const float * x_row = x + (int64_t) row * ncols;
++    unsigned long long key[NPL];
++#pragma unroll
++    for (int i = 0; i < NPL; ++i) {
++        const int c = lane + 32 * i;
++        unsigned long long kk = ~0ull;   // padding: after every real column
++        if (c < ncols) {
++            const unsigned u = __float_as_uint(x_row[c]);
++            unsigned kv = (u & 0x80000000u) ? ~u : (u | 0x80000000u);   // unsigned order = float order
++            if (order == GGML_SORT_ORDER_DESC) {
++                kv = ~kv;
++            }
++            kk = ((unsigned long long) kv << 32) | (unsigned) c;
++        }
++        key[i] = kk;
++    }
++    unsigned long long best = ~0ull;
++#pragma unroll
++    for (int i = 0; i < NPL; ++i) {
++        best = key[i] < best ? key[i] : best;
++    }
++    int * dst_row = dst + (int64_t) row * ncols;
++    for (int j = 0; j < k; ++j) {
++        unsigned long long m = best;
++#pragma unroll
++        for (int off = 16; off > 0; off >>= 1) {
++            const unsigned long long o = __shfl_xor_sync(0xFFFFFFFFu, m, off);
++            m = o < m ? o : m;
++        }
++        const int col = (int) (m & 0xFFFFFFFFull);
++        if (lane == 0) {
++            dst_row[j] = col;
++        }
++        if (lane == (col & 31)) {   // the winner drops that column and rescans its own
++            best = ~0ull;
++#pragma unroll
++            for (int i = 0; i < NPL; ++i) {
++                if (i == (col >> 5)) {
++                    key[i] = ~0ull;
++                }
++                best = key[i] < best ? key[i] : best;
++            }
++        }
++    }
++}
++
++template<ggml_sort_order order>
++static void argsort_topk_warp_launch(const float * x, int * dst, const int ncols, const int k, const int nrows,
++                                     cudaStream_t stream) {
++    const dim3 block_dims(128, 1, 1);   // 4 rows per block
++    const dim3 block_nums((nrows + 3) / 4, 1, 1);
++    const int npl = (ncols + 31) / 32;
++#define TOPK_NPL(N) if (npl <= N) { k_argsort_topk_warp_f32_i32<order, N><<<block_nums, block_dims, 0, stream>>>(x, dst, ncols, k, nrows); return; }
++    TOPK_NPL(1) TOPK_NPL(2) TOPK_NPL(4) TOPK_NPL(8) TOPK_NPL(12) TOPK_NPL(16) TOPK_NPL(24) TOPK_NPL(32)
++#undef TOPK_NPL
++    GGML_ABORT("fatal error");
++}
++
++static bool argsort_use_rank(const int ncols) {
++    static const bool on = [] {
++        const char * v = getenv("GGML_CUDA_RANK_ARGSORT");
++        return !(v && v[0] == '0');
++    }();
++    return on && ncols <= 1024;
++}
++
++static void argsort_f32_i32_cuda_rank(const float * x, int * dst, const int ncols, const int nrows,
++                                      ggml_sort_order order, cudaStream_t stream) {
++    const int ncols4 = (ncols + 3) & ~3;
++    const dim3 block_dims(std::min(1024, (ncols + 31) & ~31), 1, 1);
++    const dim3 block_nums(nrows, 1, 1);
++    const size_t shared_mem = ncols4 * sizeof(unsigned);
++    if (order == GGML_SORT_ORDER_ASC) {
++        k_argsort_rank_f32_i32<GGML_SORT_ORDER_ASC><<<block_nums, block_dims, shared_mem, stream>>>(x, dst, ncols, ncols4);
++    } else if (order == GGML_SORT_ORDER_DESC) {
++        k_argsort_rank_f32_i32<GGML_SORT_ORDER_DESC><<<block_nums, block_dims, shared_mem, stream>>>(x, dst, ncols, ncols4);
++    } else {
++        GGML_ABORT("fatal error");
++    }
++}
++
+ static int next_power_of_2(int x) {
+     int n = 1;
+     while (n < x) {
+@@ -279,6 +416,20 @@ void ggml_cuda_op_argsort(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+ 
+     enum ggml_sort_order order = (enum ggml_sort_order) dst->op_params[0];
+ 
++    if (argsort_use_rank((int) ncols)) {   // Strata-DS4: see k_argsort_rank_f32_i32 / k_argsort_topk_warp_f32_i32
++        const int k_used = dst->op_params[1];   // ggml_argsort_top_k: only the first k of a row are read
++        if (k_used > 0 && k_used <= 32 && k_used <= ncols) {
++            if (order == GGML_SORT_ORDER_ASC) {
++                argsort_topk_warp_launch<GGML_SORT_ORDER_ASC>(src0_d, (int *) dst_d, (int) ncols, k_used, (int) nrows, stream);
++            } else {
++                argsort_topk_warp_launch<GGML_SORT_ORDER_DESC>(src0_d, (int *) dst_d, (int) ncols, k_used, (int) nrows, stream);
++            }
++            return;
++        }
++        argsort_f32_i32_cuda_rank(src0_d, (int *) dst_d, (int) ncols, (int) nrows, order, stream);
++        return;
++    }
++
+ #ifdef GGML_CUDA_USE_CUB
+     const int    ncols_pad      = next_power_of_2(ncols);
+     const size_t shared_mem     = ncols_pad * sizeof(int);
+diff --git a/ggml/src/ggml-cuda/common.cuh b/ggml/src/ggml-cuda/common.cuh
+index 6b36ca90b936da27d1593ea31f8ce681b98c98fb..79fcb04007e356d5672db057ea0d26eebdde7cce 100644
+--- a/ggml/src/ggml-cuda/common.cuh
++++ b/ggml/src/ggml-cuda/common.cuh
+@@ -1549,6 +1549,10 @@ struct ggml_backend_cuda_context {
+     std::unique_ptr<ggml_cuda_pool> pools[GGML_CUDA_MAX_DEVICES][GGML_CUDA_MAX_STREAMS];
+ 
+     static std::unique_ptr<ggml_cuda_pool> new_pool_for_device(ggml_backend_cuda_context & ctx, int device, int stream_no);
++    // xolotl: the pre-upgrade form of the pool hook. The engine (src/prefill/ggml_cuda_host.cu) defines it out of
++    // line; that object is a static-archive member whose symbols llama.cpp already defines, so the linker never pulls
++    // it in and llama.cpp builds its pools through the form above. Declared only so that translation unit compiles.
++    static std::unique_ptr<ggml_cuda_pool> new_pool_for_device(int device, int stream_no);
+ 
+     ggml_cuda_pool & pool(int device) {
+         if (pools[device][curr_stream_no] == nullptr) {
+diff --git a/ggml/src/ggml-cuda/cpy-utils.cuh b/ggml/src/ggml-cuda/cpy-utils.cuh
+index 7697c292dd6f839286b5e246c8254aca5837ad51..f98b32a819353094cdc1c562fcaf30b4efc63437 100644
+--- a/ggml/src/ggml-cuda/cpy-utils.cuh
++++ b/ggml/src/ggml-cuda/cpy-utils.cuh
+@@ -186,6 +186,98 @@ static __device__ void quantize_f32_iq4_nl_block(const float * __restrict__ x, b
+     y->d = sumq2 > 0 ? sumqx/sumq2 : d;
+ }
+ 
++// ---- Strata DS4.1 FP4 KV caches (tools/v41/engine/ds41_dense.cpp --kv-fp4).  The graph's fake-quant has already put
++// every value on an FP4 grid - the compressed KV on e2m1 x an E4M3 scale per 16 (NVFP4), the indexer keys on
++// e2m1 x a power-of-2 scale per 32 (MXFP4) - and these two quantizers pack such values EXACTLY: per (sub-)block they
++// try the scales the grid admits (amax / q, q an e2m1 magnitude, snapped to the scale format) and keep the first that
++// reproduces every value bit for bit (checked by multiplication, which is exact here; fast-math division is only used
++// to find candidates).  Values not on such a grid fall back to the q = 6 scale with nearest codes (approximate).
++static __device__ __forceinline__ float ds41_e2m1_mag(int c) {   // code 0..7 -> 0, 0.5, 1, 1.5, 2, 3, 4, 6
++    return c < 4 ? 0.5f * (float) c : (c == 4 ? 2.0f : c == 5 ? 3.0f : c == 6 ? 4.0f : 6.0f);
++}
++static __device__ __forceinline__ int ds41_e2m1_nearest(float v) {   // |v| -> the nearest e2m1 code (ties: lower code)
++    const float a = fminf(fabsf(v), 6.0f);
++    int best = 0; float err = a;
++    for (int c = 1; c < 8; ++c) { const float e = fabsf(a - ds41_e2m1_mag(c)); if (e < err) { err = e; best = c; } }
++    return best;
++}
++// value x and scale s: the code whose value * s == x exactly, or -1
++static __device__ __forceinline__ int ds41_e2m1_exact(float x, float s) {
++    const int c = ds41_e2m1_nearest(x / s);
++    const float m = ds41_e2m1_mag(c);
++    if (m * s == fabsf(x)) return c | (x < 0.0f ? 8 : 0);
++    return -1;
++}
++// x >= 0 -> the nearest E4M3 value (RNE, subnormal spacing 2^-9, saturating at 448), as float
++static __device__ __forceinline__ float ds41_round_e4m3(float x) {
++    if (!(x > 0.0f)) return 0.0f;
++    if (x >= 448.0f) return 448.0f;
++    if (x < 0x1p-6f) return rintf(x * 512.0f) * 0x1p-9f;
++    int e; frexpf(x, &e);                                    // x = m 2^e, m in [0.5, 1): spacing 2^(e-4)
++    const float u = ldexpf(1.0f, e - 4);
++    return rintf(x * ldexpf(1.0f, 4 - e)) * u;
++}
++static __device__ __forceinline__ uint8_t ds41_e4m3_bits(float s) {   // s an E4M3 value > 0
++    if (s < 0x1p-6f) return (uint8_t) (int) (s * 512.0f);
++    int e; const float m = frexpf(s, &e);                    // s = (2m) 2^(e-1)
++    return (uint8_t) (((e - 1 + 7) << 3) | ((int) ((2.0f * m - 1.0f) * 8.0f + 0.5f) & 7));
++}
++
++static __device__ void quantize_f32_nvfp4_ds41_block(const float * __restrict__ x, block_nvfp4 * __restrict__ y) {
++    for (int sb = 0; sb < QK_NVFP4/QK_NVFP4_SUB; ++sb) {
++        const float * xs = x + sb*QK_NVFP4_SUB;
++        float amax = 0.0f;
++        for (int j = 0; j < QK_NVFP4_SUB; ++j) amax = fmaxf(amax, fabsf(xs[j]));
++        float s = 0x1p-9f;
++        bool exact = amax == 0.0f;
++        if (!exact) {
++            const float qm[7] = { 6.0f, 4.0f, 3.0f, 2.0f, 1.5f, 1.0f, 0.5f };
++            for (int k = 0; k < 7 && !exact; ++k) {
++                const float c = ds41_round_e4m3(amax / qm[k]);
++                if (c <= 0.0f) continue;
++                bool ok = true;
++                for (int j = 0; j < QK_NVFP4_SUB && ok; ++j) ok = ds41_e2m1_exact(xs[j], c) >= 0;
++                if (ok) { s = c; exact = true; }
++            }
++            if (!exact) s = fmaxf(ds41_round_e4m3(amax / 6.0f), 0x1p-9f);
++        }
++        y->d[sb] = ds41_e4m3_bits(s);
++        for (int j = 0; j < QK_NVFP4_SUB/2; ++j) {
++            int c0 = ds41_e2m1_exact(xs[j], s), c1 = ds41_e2m1_exact(xs[j + QK_NVFP4_SUB/2], s);
++            if (c0 < 0) c0 = ds41_e2m1_nearest(xs[j] / s) | (xs[j] < 0.0f ? 8 : 0);
++            if (c1 < 0) c1 = ds41_e2m1_nearest(xs[j + QK_NVFP4_SUB/2] / s) | (xs[j + QK_NVFP4_SUB/2] < 0.0f ? 8 : 0);
++            y->qs[sb*(QK_NVFP4_SUB/2) + j] = (uint8_t) (c0 | (c1 << 4));
++        }
++    }
++}
++
++static __device__ void quantize_f32_mxfp4_ds41_block(const float * __restrict__ x, block_mxfp4 * __restrict__ y) {
++    float amax = 0.0f;
++    for (int j = 0; j < QK_MXFP4; ++j) amax = fmaxf(amax, fabsf(x[j]));
++    int E = -127;                                            // scale 2^E, E8M0 byte E + 127
++    if (amax > 0.0f) {
++        int e; frexpf(amax, &e);                             // amax in [2^(e-1), 2^e): the floor rule's E = e - 3
++        bool found = false;
++        for (int k = 0; k < 4 && !found; ++k) {
++            const int t = e - 3 + (k == 0 ? 0 : k == 1 ? 1 : k == 2 ? -1 : 2);
++            const float s = ldexpf(1.0f, t);
++            bool ok = true;
++            for (int j = 0; j < QK_MXFP4 && ok; ++j) ok = ds41_e2m1_exact(x[j], s) >= 0;
++            if (ok) { E = t; found = true; }
++        }
++        if (!found) { int e2; frexpf(amax / 6.0f, &e2); E = e2; }   // pow2 ceil of amax / 6 (approximate path)
++    }
++    E = max(-126, min(127, E));
++    y->e = (uint8_t) (E + 127);
++    const float s = ldexpf(1.0f, E);
++    for (int j = 0; j < QK_MXFP4/2; ++j) {
++        int c0 = ds41_e2m1_exact(x[j], s), c1 = ds41_e2m1_exact(x[j + QK_MXFP4/2], s);
++        if (c0 < 0) c0 = ds41_e2m1_nearest(x[j] / s) | (x[j] < 0.0f ? 8 : 0);
++        if (c1 < 0) c1 = ds41_e2m1_nearest(x[j + QK_MXFP4/2] / s) | (x[j + QK_MXFP4/2] < 0.0f ? 8 : 0);
++        y->qs[j] = (uint8_t) (c0 | (c1 << 4));
++    }
++}
++
+ // Wrapper functions for cpy.cu compatibility
+ static __device__ void cpy_blck_f32_q4_0(const char * cxi, char * cdsti) {
+     quantize_f32_q4_0_block((const float *)cxi, (block_q4_0 *)cdsti);
+diff --git a/ggml/src/ggml-cuda/dequantize.cuh b/ggml/src/ggml-cuda/dequantize.cuh
+index 651524be7b3e51c8689e731d1207d21167e9d3f0..57c5b8ae75a21d65ad9f9af3722275724952b9af 100644
+--- a/ggml/src/ggml-cuda/dequantize.cuh
++++ b/ggml/src/ggml-cuda/dequantize.cuh
+@@ -435,6 +435,24 @@ static __device__ __forceinline__ void dequantize_iq4_xs(const void * vx, const
+     }
+ }
+ 
++// Strata DS4.1 --kv-fp4: NVFP4 rows for get_rows (a QK_K super-block = 4 NVFP4 blocks; 32 threads x 8 values).
++// Same values as dequantize_block_nvfp4 (convert.cu): ue4m3(d) (= E4M3 / 2) x kvalues (= 2 x e2m1) - exact.
++template<typename dst_t>
++static __device__ __forceinline__ void dequantize_nvfp4(const void * vx, const int64_t ibs, dst_t * yy, const int tid) {
++    const block_nvfp4 * x = (const block_nvfp4 *) vx + ibs*(QK_K/QK_NVFP4);
++    const int b  = tid/8;        // block 0..3
++    const int sb = (tid%8)/2;    // sub-block 0..3
++    const int h  = tid%2;        // bytes 0-3 / 4-7 of the sub-block
++    const block_nvfp4 & xb = x[b];
++    const float d = ggml_cuda_ue4m3_to_fp32(xb.d[sb]);
++    const uint8_t * q = xb.qs + sb*(QK_NVFP4_SUB/2) + 4*h;
++    dst_t * y = yy + b*QK_NVFP4 + sb*QK_NVFP4_SUB + 4*h;
++    for (int j = 0; j < 4; ++j) {
++        y[j]                  = ggml_cuda_cast<dst_t>(d * kvalues_mxfp4[q[j] & 0x0F]);
++        y[j + QK_NVFP4_SUB/2] = ggml_cuda_cast<dst_t>(d * kvalues_mxfp4[q[j] >> 4]);
++    }
++}
++
+ template<typename dst_t>
+ static __device__ __forceinline__ void dequantize_mxfp4(const void * vx, const int64_t ibs, dst_t * yy, const int tid) {
+ 
+diff --git a/ggml/src/ggml-cuda/dsv4-hc.cu b/ggml/src/ggml-cuda/dsv4-hc.cu
+index 2d0b3cfeaed7b07bb5467d150c98e410beb1ea1a..d6d436abc267d97ca13a84dbf3f2c14fc8d798b0 100644
+--- a/ggml/src/ggml-cuda/dsv4-hc.cu
++++ b/ggml/src/ggml-cuda/dsv4-hc.cu
+@@ -331,3 +331,130 @@ void ggml_cuda_op_dsv4_hc_post(ggml_backend_cuda_context & ctx, ggml_tensor * ds
+             nbd0 / sizeof(float), nbd1 / sizeof(float), nbd2 / sizeof(float),
+             gate_in, gate_out);
+ }
++
++
++// ---- Strata-DS4: GGML_OP_DSV41_FAKE_QUANT - DeepSeek-V4.1's activation quantize-dequantize in one kernel.
++// tools/v41/engine/ds41_ops.hpp builds it from ~45 stock ops per call (abs, pool max, clamp, div, scale, step, ...);
++// this repeats that composite step for step under the same -use_fast_math flags, so the values are bit-identical:
++// a stock binary op is one plain op (__fadd_rn / __fsub_rn / __fmul_rn: .rn.ftz, never contracted, = binbcast's
++// a op b), division is '/' (div.approx.ftz, = binbcast's op_div), ggml_scale is scale_f32's `scale * x + bias` = one
++// FMA (__fmaf_rn), abs = fabsf, step = x > 0, clamp = fminf(fmaxf), the pool's max = fmaxf over the block.
++
++static __device__ __forceinline__ float dsv41_fq_scale(float x, float s, float b) { return __fmaf_rn(s, x, b); }
++static __device__ __forceinline__ float dsv41_fq_step(float x) { return x > 0.0f ? 1.0f : 0.0f; }
++static __device__ __forceinline__ float dsv41_fq_clamp(float x, float lo, float hi) { return fminf(fmaxf(x, lo), hi); }
++
++static __device__ __forceinline__ float dsv41_fq_pow2_ceil(float a) {
++    const float g  = dsv41_fq_scale(a, 8388609.0f, 0.0f);                 // a * (2^23 + 1)
++    const float hi = __fadd_rn(g, __fsub_rn(a, g));                        // a rounded to 1 significant bit
++    return __fmul_rn(hi, dsv41_fq_scale(dsv41_fq_step(__fsub_rn(a, hi)), 1.0f, 1.0f));
++}
++
++static __device__ __forceinline__ float dsv41_fq_pow2_floor(float a) {
++    const float f = dsv41_fq_pow2_ceil(a);
++    return __fmul_rn(f, dsv41_fq_scale(dsv41_fq_step(__fsub_rn(f, a)), -0.5f, 1.0f));
++}
++
++static __device__ __forceinline__ float dsv41_fq_round_fmt(float v, int mbits, float min_normal) {
++    const float p = dsv41_fq_clamp(dsv41_fq_pow2_floor(fabsf(v)), min_normal, INFINITY);
++    const float k = (float) (1 << mbits);
++    const float C = 12582912.0f;                                           // 1.5 * 2^23: round half to even
++    const float y = dsv41_fq_scale(v / p, k, 0.0f);
++    const float r = dsv41_fq_scale(dsv41_fq_scale(y, 1.0f, C), 1.0f, -C);
++    return __fmul_rn(dsv41_fq_scale(r, 1.0f / k, 0.0f), p);
++}
++
++// one thread per element; a block of BS elements = BS consecutive lanes (n % BS == 0, so a lane group is wholly in or
++// wholly out of range and every lane takes part in the shuffles)
++template <int BS>
++static __global__ void dsv41_fake_quant_f32(const float * __restrict__ x, float * __restrict__ y, const int64_t n,
++                                            const int mode, const float maxv, const float floor_) {
++    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
++    const float xi = i < n ? x[i] : 0.0f;
++    float a = i < n ? fabsf(xi) : -FLT_MAX;
++#pragma unroll
++    for (int o = BS / 2; o > 0; o >>= 1) {
++        a = fmaxf(a, __shfl_xor_sync(0xffffffff, a, o, BS));
++    }
++    if (i >= n) {
++        return;
++    }
++    const float t = dsv41_fq_clamp(a, floor_, INFINITY) / maxv;
++    const float s = mode == 1 ? dsv41_fq_round_fmt(t, 3, 0x1p-6f) : dsv41_fq_pow2_ceil(t);
++    const float v = dsv41_fq_clamp(xi / s, -maxv, maxv);
++    const float q = mode == 0 ? dsv41_fq_round_fmt(v, 3, 0x1p-6f) : dsv41_fq_round_fmt(v, 1, 1.0f);
++    y[i] = __fmul_rn(q, s);
++}
++
++void ggml_cuda_op_dsv41_fake_quant(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * src0 = dst->src[0];
++    GGML_ASSERT(src0->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32 && ggml_is_contiguous(src0));
++    const int mode = ggml_get_op_params_i32(dst, 0);
++    const int64_t n = ggml_nelements(src0);
++    const float maxv = mode == 0 ? 448.0f : 6.0f;
++    const float floor_ = mode == 0 ? 1e-4f : mode == 1 ? 6.0f / 512.0f : 6.0f * 0x1p-126f;
++    const int64_t blocks = (n + 255) / 256;
++    cudaStream_t stream = ctx.stream();
++    if (mode == 1) {
++        GGML_ASSERT(n % 16 == 0);
++        dsv41_fake_quant_f32<16><<<blocks, 256, 0, stream>>>((const float *) src0->data, (float *) dst->data, n, mode, maxv, floor_);
++    } else {
++        GGML_ASSERT(n % 32 == 0);
++        dsv41_fake_quant_f32<32><<<blocks, 256, 0, stream>>>((const float *) src0->data, (float *) dst->data, n, mode, maxv, floor_);
++    }
++    CUDA_CHECK(cudaGetLastError());
++}
++
++
++// ---- Strata-DS4: GGML_OP_DSV41_HC_MIXES - the two HC mixes of one model.py Block.hc_mixes in one kernel.
++// tools/v41/engine/ds41_dense.cpp hc_mixes builds them from mul + add + sigmoid + ggml_scale(_bias); this repeats that
++// composite step for step under the same -use_fast_math flags, so the values are bit-identical:
++// a stock binary op is one plain op (__fmul_rn / __fadd_rn: .rn.ftz, never contracted, = binbcast's a op b), ggml_scale
++// is scale_f32's `scale * x + bias` = one FMA (__fmaf_rn), sigmoid is unary_op_kernel's op_sigmoid.
++static __device__ __forceinline__ float dsv41_hc_mix_sigmoid(float x) {
++    return 1.0f / (1.0f + expf(-x));
++}
++
++// one thread per output element: dst [hc, 2*nt] = [ pre | post ]
++static __global__ void dsv41_hc_mixes_f32(
++        const float * __restrict__ mixes,
++        const int64_t nrow,                                // mixes->ne[0] = 2*hc (+ hc*hc comb rows the op does not read)
++        const float * __restrict__ scale,
++        const float * __restrict__ base,
++        float * __restrict__ dst,
++        const int64_t hc,
++        const int64_t nt,
++        const float eps) {
++    const int64_t n = 2*hc*nt;
++    const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
++    if (i >= n) {
++        return;
++    }
++    const int64_t h    = i % hc;
++    const int64_t col  = i / hc;                       // 0..nt-1 = the pre mix, nt..2*nt-1 = the post mix
++    const int64_t post = col >= nt;
++    const int64_t t    = post ? col - nt : col;
++    const int64_t r    = post ? hc + h : h;
++    const float   v    = __fadd_rn(__fmul_rn(mixes[r + nrow*t], scale[post]), base[r]);
++    const float   s    = dsv41_hc_mix_sigmoid(v);
++    dst[i] = post ? __fmaf_rn(2.0f, s, 0.0f) : __fmaf_rn(1.0f, s, eps);
++}
++
++void ggml_cuda_op_dsv41_hc_mixes(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
++    const ggml_tensor * mixes = dst->src[0];
++    const ggml_tensor * scale = dst->src[1];
++    const ggml_tensor * base  = dst->src[2];
++    GGML_ASSERT(mixes->type == GGML_TYPE_F32 && ggml_is_contiguous(mixes));
++    GGML_ASSERT(scale->type == GGML_TYPE_F32 && ggml_nelements(scale) == 2);
++    GGML_ASSERT(base->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
++    GGML_ASSERT(dst->ne[1] % 2 == 0 && mixes->ne[0] >= dst->ne[0] * 2);
++    const int64_t hc = base->ne[0] / 2;
++    const int64_t nt = dst->ne[1] / 2;
++    const float   eps = ggml_get_op_params_f32(dst, 0);
++    const int64_t n = 2*hc*nt;
++    const int64_t blocks = (n + 255) / 256;
++    cudaStream_t stream = ctx.stream();
++    dsv41_hc_mixes_f32<<<blocks, 256, 0, stream>>>((const float *) mixes->data, mixes->ne[0], (const float *) scale->data,
++                                                   (const float *) base->data, (float *) dst->data, hc, nt, eps);
++    CUDA_CHECK(cudaGetLastError());
++}
+diff --git a/ggml/src/ggml-cuda/dsv4-hc.cuh b/ggml/src/ggml-cuda/dsv4-hc.cuh
+index 1885e76659d5a67bbc5c829e91f1df0ffecf6099..7e298f4f0da261585a9dee9aa91a92102854970a 100644
+--- a/ggml/src/ggml-cuda/dsv4-hc.cuh
++++ b/ggml/src/ggml-cuda/dsv4-hc.cuh
+@@ -6,3 +6,5 @@ void ggml_cuda_op_dsv4_hc_pre(ggml_backend_cuda_context & ctx, ggml_tensor * dst
+ // gate_scale_in/gate_scale_out: the SCALE nodes of a fused SCALE -> SIGMOID -> SCALE chain feeding src[2]
+ void ggml_cuda_op_dsv4_hc_post(ggml_backend_cuda_context & ctx, ggml_tensor * dst,
+         const ggml_tensor * gate_scale_in = nullptr, const ggml_tensor * gate_scale_out = nullptr);
++void ggml_cuda_op_dsv41_fake_quant(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
++void ggml_cuda_op_dsv41_hc_mixes(ggml_backend_cuda_context & ctx, ggml_tensor * dst);
+diff --git a/ggml/src/ggml-cuda/fattn-common.cuh b/ggml/src/ggml-cuda/fattn-common.cuh
+index 41d948335ef512f961e7332e834445a0fc53ad45..4cb6ea0b0293f571f1d9ea35120b264374a2548b 100644
+--- a/ggml/src/ggml-cuda/fattn-common.cuh
++++ b/ggml/src/ggml-cuda/fattn-common.cuh
+@@ -622,6 +622,28 @@ static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict
+     }
+ }
+ 
++// Strata DS4.1 --kv-fp4: MXFP4 K rows (the lightning indexer's keys).  E8M0(e) x e2m1 - exact values.
++template <typename T, int ne>
++static __device__ __forceinline__ void dequantize_V_mxfp4(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
++    const block_mxfp4 * x = (const block_mxfp4 *) vx;
++    const int64_t ib  = i0 / QK_MXFP4;
++    const int     iqs = i0 % QK_MXFP4;
++    const float d = ggml_cuda_e8m0_to_fp32(x[ib].e) * 0.5f;
++#pragma unroll
++    for (int l = 0; l < ne; ++l) {
++        const int k = iqs + l;
++        const uint8_t q = x[ib].qs[k % (QK_MXFP4/2)];
++        const float v = d * kvalues_mxfp4[k < QK_MXFP4/2 ? (q & 0x0F) : (q >> 4)];
++        if constexpr (std::is_same<T, float>::value) {
++            ((float *) dst)[l] = v;
++        } else if constexpr (std::is_same<T, half>::value) {
++            ((half *) dst)[l] = __float2half(v);
++        } else {
++            static_assert(std::is_same_v<T, void>, "unsupported type");
++        }
++    }
++}
++
+ template <ggml_type type_K, int D, int nthreads>
+ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
+     if constexpr (type_K == GGML_TYPE_F16) {
+@@ -660,6 +682,8 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
+         return dequantize_V_q8_0<T, ne>;
+     } else if constexpr (type_V == GGML_TYPE_BF16) {
+         return dequantize_V_bf16<float, ne>;
++    } else if constexpr (type_V == GGML_TYPE_MXFP4) {
++        return dequantize_V_mxfp4<T, ne>;
+     } else {
+         static_assert(type_V == -1, "bad type");
+         return nullptr;
+diff --git a/ggml/src/ggml-cuda/getrows.cu b/ggml/src/ggml-cuda/getrows.cu
+index d97e8fdb0f401a9f68394c915aa564e1cee321ac..bd0348cf5860453b8ed9186cde3b9d48e46ca8a4 100644
+--- a/ggml/src/ggml-cuda/getrows.cu
++++ b/ggml/src/ggml-cuda/getrows.cu
+@@ -404,6 +404,10 @@ static void ggml_cuda_get_rows_switch_src0_type(
+             get_rows_cuda_kq<32, dst_t, dequantize_mxfp4<dst_t>>(src0_d, src1_d, dst_d,
+                 ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
+             break;
++        case GGML_TYPE_NVFP4:   // Strata DS4.1 --kv-fp4
++            get_rows_cuda_kq<32, dst_t, dequantize_nvfp4<dst_t>>(src0_d, src1_d, dst_d,
++                ne00, nb01, nb02, nb03, ne10, ne11, ne12, nb10, nb11, nb12, nb1, nb2, nb3, stream);
++            break;
+         default:
+             GGML_ABORT("%s: unsupported src0 type: %s\n", __func__, ggml_type_name(src0_type));
+     }
+diff --git a/ggml/src/ggml-cuda/ggml-cuda.cu b/ggml/src/ggml-cuda/ggml-cuda.cu
+index aff687a9a96041d07062c9cfb3284f167300b1a9..9f60385551fda129d1e558f06afc03cfc38720b1 100644
+--- a/ggml/src/ggml-cuda/ggml-cuda.cu
++++ b/ggml/src/ggml-cuda/ggml-cuda.cu
+@@ -2605,6 +2605,12 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
+         case GGML_OP_DSV4_HC_POST:
+             ggml_cuda_op_dsv4_hc_post(ctx, dst);
+             break;
++        case GGML_OP_DSV41_FAKE_QUANT:
++            ggml_cuda_op_dsv41_fake_quant(ctx, dst);
++            break;
++        case GGML_OP_DSV41_HC_MIXES:
++            ggml_cuda_op_dsv41_hc_mixes(ctx, dst);
++            break;
+         case GGML_OP_RWKV_WKV7:
+             ggml_cuda_op_rwkv_wkv7(ctx, dst);
+             break;
+@@ -2782,6 +2788,12 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
+     bool use_cuda_graph = true;
+     // Loop over nodes in GGML graph to obtain info needed for CUDA graph
+ 
++    // xolotl s6: GGML_CUDA_GRAPH_MAX_TOKENS=N (default 0 = no limit) - a graph whose matrix products take more than N
++    // token columns (a prompt chunk) runs without a CUDA graph. Launch overhead is noise at prompt batch sizes, and
++    // instantiating a prompt chunk's graph needs VRAM the engine has just given to the chunk (GLM: cudaGraphInstantiate
++    // out of memory on a fresh ~30K prompt). Decode (1 token) keeps its graphs.
++    static const int64_t max_tokens = getenv("GGML_CUDA_GRAPH_MAX_TOKENS") ? atoll(getenv("GGML_CUDA_GRAPH_MAX_TOKENS")) : 0;
++
+     for (int i = 0; i < cgraph->n_nodes; i++) {
+         ggml_tensor * node = cgraph->nodes[i];
+ 
+@@ -2789,6 +2801,12 @@ static bool ggml_cuda_graph_check_compability(ggml_cgraph * cgraph) {
+             continue;
+         }
+ 
++        if (max_tokens > 0 && (node->op == GGML_OP_MUL_MAT || node->op == GGML_OP_MUL_MAT_ID) && node->src[1] &&
++            node->src[1]->ne[1] * (node->op == GGML_OP_MUL_MAT_ID ? node->src[1]->ne[2] : 1) > max_tokens) {
++            use_cuda_graph = false;
++            break;
++        }
++
+         // [TAG_MUL_MAT_ID_CUDA_GRAPHS]
+         if (node->op == GGML_OP_MUL_MAT_ID) {
+             const int cc = ggml_cuda_info().devices[ggml_cuda_get_device()].cc;
+@@ -5395,6 +5413,21 @@ bool ggml_backend_is_cuda(ggml_backend_t backend) {
+     return backend != NULL && ggml_guid_matches(backend->guid, ggml_backend_cuda_guid());
+ }
+ 
++// xolotl: drop every cached CUDA graph.  See ggml-cuda.h for why: a caller that frees its ggml graph context and
++// re-creates one of the same size gets the same node pointers back, so a cached graph would be replayed against
++// freed buffers.  Waiting for the device first means no captured kernel is still running when the execs go away.
++void ggml_backend_cuda_graph_cache_clear(ggml_backend_t backend) {
++    if (!ggml_backend_is_cuda(backend)) {
++        return;
++    }
++    ggml_backend_cuda_context * ctx = (ggml_backend_cuda_context *) backend->context;
++#ifdef USE_CUDA_GRAPH
++    ggml_cuda_set_device(ctx->device);
++    CUDA_CHECK(cudaDeviceSynchronize());
++    ctx->cuda_graphs.clear();   // ~ggml_cuda_graph destroys each exec and graph
++#endif
++}
++
+ int ggml_backend_cuda_get_device_count() {
+     return ggml_cuda_info().device_count;
+ }
+@@ -5815,6 +5848,7 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+                         return true;
+                     case GGML_TYPE_IQ4_NL:
+                     case GGML_TYPE_MXFP4:
++                    case GGML_TYPE_NVFP4:   // Strata DS4.1 --kv-fp4 (64-value blocks, 4 per super-block)
+                         // 32-value sub-blocks, the row size does not guarantee
+                         // the QK_K super-blocks the get_rows kernel iterates on
+                         return op->src[0]->ne[0] % QK_K == 0;
+@@ -5830,7 +5864,8 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+                            (
+                                (op->type == GGML_TYPE_F32 || op->type == GGML_TYPE_F16 || op->type == GGML_TYPE_BF16 ||
+                                op->type == GGML_TYPE_Q4_0 || op->type == GGML_TYPE_Q4_1 || op->type == GGML_TYPE_Q5_0 ||
+-                               op->type == GGML_TYPE_Q5_1 || op->type == GGML_TYPE_Q8_0 || op->type == GGML_TYPE_IQ4_NL) &&
++                               op->type == GGML_TYPE_Q5_1 || op->type == GGML_TYPE_Q8_0 || op->type == GGML_TYPE_IQ4_NL ||
++                               op->type == GGML_TYPE_NVFP4 || op->type == GGML_TYPE_MXFP4) &&
+                                op->src[0]->type == GGML_TYPE_F32
+                            ) || (
+                                op->type == GGML_TYPE_F16 && op->src[0]->type == GGML_TYPE_F16
+@@ -6109,6 +6144,11 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
+             return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
+                 op->src[2]->type == GGML_TYPE_F32 && (op->src[3] == nullptr || op->src[3]->type == GGML_TYPE_F32) &&
+                 op->type == GGML_TYPE_F32;
++        case GGML_OP_DSV41_FAKE_QUANT:
++            return op->src[0]->type == GGML_TYPE_F32 && ggml_is_contiguous(op->src[0]) && op->type == GGML_TYPE_F32;
++        case GGML_OP_DSV41_HC_MIXES:
++            return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 &&
++                op->src[2]->type == GGML_TYPE_F32 && ggml_is_contiguous(op->src[0]) && op->type == GGML_TYPE_F32;
+         case GGML_OP_FLASH_ATTN_EXT:
+             return ggml_cuda_flash_attn_ext_supported(dev_ctx->device, op);
+         case GGML_OP_CROSS_ENTROPY_LOSS:
+diff --git a/ggml/src/ggml-cuda/lightning-indexer.cu b/ggml/src/ggml-cuda/lightning-indexer.cu
+index 429d2e200c8405a223887e27d103c5ab6e643ad2..cd996532105e7de3786fed2e393ab22c2896e01a 100644
+--- a/ggml/src/ggml-cuda/lightning-indexer.cu
++++ b/ggml/src/ggml-cuda/lightning-indexer.cu
+@@ -3,6 +3,18 @@
+ #include "fattn-common.cuh"
+ #include "convert.cuh"
+ 
++template <int WARPS_PER_BLOCK, int K_VECS_PER_BLOCK, int64_t N_EMBD, int64_t N_HEAD, ggml_type TYPE_K>
++static __device__ __forceinline__ void lightning_indexer_vec(
++        const float * Q, const char * K, const float * W, const half * M, float * dst,
++        int64_t n_stream, int64_t n_batch, int64_t n_kv,
++        size_t nb1, size_t nb2, size_t nb3,
++        size_t nbq1, size_t nbq2, size_t nbq3,
++        size_t nbk1, size_t nbk2, size_t nbk3,
++        size_t nbw1, size_t nbw2, size_t nbw3,
++        size_t nbm1, size_t nbm2, size_t nbm3,
++        int64_t nem3, const float * NV
++    );
++
+ #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+ #if defined(TURING_MMA_AVAILABLE)
+ 
+@@ -24,7 +36,7 @@ static __global__ void lightning_indexer_kernel_wmma(
+         size_t nbk1, size_t nbk2, size_t nbk3,
+         size_t nbw1, size_t nbw2, size_t nbw3,
+         size_t nbm1, size_t nbm2, size_t nbm3,
+-        int64_t nem3
++        int64_t nem3, const float * NV
+     ) {
+ 
+     constexpr int THREADS_PER_BLOCK = WARPS_PER_BLOCK * WARP_SIZE;
+@@ -40,10 +52,48 @@ static __global__ void lightning_indexer_kernel_wmma(
+ 
+     // each block processes K_VECS_PER_BLOCK K vectors
+     const int start_kv = blockIdx.x * K_VECS_PER_BLOCK;
++    const float nvis = NV ? *(const float *) ((const char *) NV + i_batch*nbm1 + (i_stream%nem3)*nbm3) : INFINITY;
++    if (!(start_kv < nvis)) { // uniform across the block; no Q/K reads or barriers
++        if (tid < K_VECS_PER_BLOCK && start_kv + tid < n_kv) {
++            float * dst_base = (float *) ((char *) dst + i_batch*nb1 + i_stream*nb3);
++            dst_base[start_kv + tid] = -INFINITY;
++        }
++        return;
++    }
+ 
+     const char  * q_base = (const char  *)                 Q + i_batch*nbq2 + i_stream*nbq3;
+     const float * w_base = (const float *) ((const char *) W + i_batch*nbw1 + i_stream*nbw3);
+ 
++    if constexpr (TYPE_K == GGML_TYPE_MXFP4) {
++        // e2m1 * 2^(e-127) is exactly representable as normal half for e in [114, 140]:
++        // the smallest nonzero is 2^-14, the largest is 6 * 2^13 = 49152.
++        // Q is F32 at the API: check its actual values, rather than assume fake quant was enabled.
++        // PTX leaves subnormal MMA inputs unspecified, so use vec for those too.
++        int unsafe = 0;
++        for (int i = tid; i < N_HEAD * (N_EMBD / 4); i += THREADS_PER_BLOCK) {
++            const float4 v = *(const float4 *) (q_base + (i / (N_EMBD / 4))*nbq1 + (i % (N_EMBD / 4))*sizeof(float4));
++            unsafe |= !isfinite(v.x) || __half2float(__float2half_rn(v.x)) != v.x || (v.x != 0.0f && fabsf(v.x) < 0x1p-14f);
++            unsafe |= !isfinite(v.y) || __half2float(__float2half_rn(v.y)) != v.y || (v.y != 0.0f && fabsf(v.y) < 0x1p-14f);
++            unsafe |= !isfinite(v.z) || __half2float(__float2half_rn(v.z)) != v.z || (v.z != 0.0f && fabsf(v.z) < 0x1p-14f);
++            unsafe |= !isfinite(v.w) || __half2float(__float2half_rn(v.w)) != v.w || (v.w != 0.0f && fabsf(v.w) < 0x1p-14f);
++        }
++        for (int i = tid; i < K_VECS_PER_BLOCK * (N_EMBD / QK_MXFP4); i += THREADS_PER_BLOCK) {
++            const int row = start_kv + i / (N_EMBD / QK_MXFP4);
++            if (row < n_kv && row < nvis) {
++                const block_mxfp4 * kr = (const block_mxfp4 *) (K + row*nbk2 + i_stream*nbk3);
++                const uint8_t e = kr[i % (N_EMBD / QK_MXFP4)].e;
++                unsafe |= e < 114 || e > 140;
++            }
++        }
++        if (__syncthreads_or(unsafe)) {
++            lightning_indexer_vec<WARPS_PER_BLOCK, K_VECS_PER_BLOCK, N_EMBD, N_HEAD, TYPE_K>(
++                Q, K, W, M, dst, n_stream, n_batch, n_kv,
++                nb1, nb2, nb3, nbq1, nbq2, nbq3, nbk1, nbk2, nbk3, nbw1, nbw2, nbw3,
++                nbm1, nbm2, nbm3, nem3, NV);
++            return;
++        }
++    }
++
+     // phase 1 - load weights and first Q tile to shared memory
+ 
+     __shared__ float w_shared[N_HEAD];
+@@ -81,7 +131,7 @@ static __global__ void lightning_indexer_kernel_wmma(
+             const int i_k_vec = i_k / (N_EMBD / 4);
+             const int i_embd = i_k % (N_EMBD / 4);
+             const int i_kv = start_kv + i_k_vec;
+-            if (i_kv < n_kv) {
++            if (i_kv < n_kv && i_kv < nvis) {
+                 const int2 * k_base = (const int2 *) ((const char *) K + i_kv*nbk2 + i_stream*nbk3);
+                 *(int2*) &k_shared_h[i_k_vec][i_embd] = k_base[i_embd];
+             } else {
+@@ -95,7 +145,7 @@ static __global__ void lightning_indexer_kernel_wmma(
+             const int i_k_vec = i_k / (N_EMBD / 4);
+             const int i_embd = i_k % (N_EMBD / 4);
+             const int i_kv = start_kv + i_k_vec;
+-            if (i_kv < n_kv) {
++            if (i_kv < n_kv && i_kv < nvis) {
+                 const void * k_base = (const void *) ((const char *) K + i_kv*nbk2 + i_stream*nbk3);
+                 dequantize_k(k_base, &k_shared_h[i_k_vec][i_embd][0], i_embd * 4);
+             } else {
+@@ -175,7 +225,7 @@ static __global__ void lightning_indexer_kernel_wmma(
+ 
+         // ReLU, weight
+         sum = sum > 0.0f ? sum : 0.0f;
+-        sum *= w_val;
++        if constexpr (TYPE_K != GGML_TYPE_MXFP4) sum *= w_val;
+ 
+         // wait until qk_shared[0] is no longer used
+         __syncthreads();
+@@ -190,7 +240,11 @@ static __global__ void lightning_indexer_kernel_wmma(
+         if (tid < K_VECS_PER_BLOCK) {
+ #pragma unroll
+             for (int i_head = 0; i_head < HEADS_PER_INNER_LOOP; ++i_head) {
+-                score_k += qk_shared[0][i_head][tid];
++                if constexpr (TYPE_K == GGML_TYPE_MXFP4) {
++                    score_k += qk_shared[0][i_head][tid] * w_shared[i_head_0 + i_head];
++                } else {
++                    score_k += qk_shared[0][i_head][tid];
++                }
+             }
+         }
+ 
+@@ -203,9 +257,9 @@ static __global__ void lightning_indexer_kernel_wmma(
+     if (tid < K_VECS_PER_BLOCK) {
+         const int i_kv = start_kv + tid;
+         if (i_kv < n_kv) {
+-            const half * m_base = (const half *) ((const char *) M + i_batch*nbm1 + (i_stream%nem3)*nbm3);
++            const half * m_base = M ? (const half *) ((const char *) M + i_batch*nbm1 + (i_stream%nem3)*nbm3) : nullptr;
+             float * dst_base = (float *) ((char *) dst + i_batch*nb1 + i_stream*nb3);
+-            dst_base[i_kv] = score_k + __half2float(m_base[i_kv]);
++            dst_base[i_kv] = i_kv < nvis ? score_k + (NV ? 0.0f : __half2float(m_base[i_kv])) : -INFINITY;
+         }
+     }
+ }
+@@ -221,7 +275,7 @@ static __global__ void lightning_indexer_kernel_wmma(
+         size_t nbk1, size_t nbk2, size_t nbk3,
+         size_t nbw1, size_t nbw2, size_t nbw3,
+         size_t nbm1, size_t nbm2, size_t nbm3,
+-        int64_t nem3
++        int64_t nem3, const float * NV
+     ) {
+     GGML_UNUSED_VARS(Q, K, W, M, dst,
+         n_stream, n_batch, n_kv,
+@@ -229,7 +283,7 @@ static __global__ void lightning_indexer_kernel_wmma(
+         nbq1, nbq2, nbq3,
+         nbk1, nbk2, nbk3,
+         nbw1, nbw2, nbw3,
+-        nem3);
++        nem3, NV);
+     NO_DEVICE_CODE;
+ }
+ 
+@@ -252,7 +306,7 @@ static __global__ void lightning_indexer_kernel_wmma(
+ // 32 * 4 = 128 (N_EMBD)
+ 
+ template <int WARPS_PER_BLOCK, int K_VECS_PER_BLOCK, int64_t N_EMBD, int64_t N_HEAD, ggml_type TYPE_K>
+-static __global__ void lightning_indexer_kernel_vec(
++static __device__ __forceinline__ void lightning_indexer_vec(
+         const float * Q, const char * K, const float * W, const half * M, float * dst,
+         int64_t n_stream, int64_t n_batch, int64_t n_kv,
+         size_t nb1, size_t nb2, size_t nb3,
+@@ -260,7 +314,7 @@ static __global__ void lightning_indexer_kernel_vec(
+         size_t nbk1, size_t nbk2, size_t nbk3,
+         size_t nbw1, size_t nbw2, size_t nbw3,
+         size_t nbm1, size_t nbm2, size_t nbm3,
+-        int64_t nem3
++        int64_t nem3, const float * NV
+     ) {
+ 
+     constexpr int K_VECS_PER_WARP = K_VECS_PER_BLOCK / WARPS_PER_BLOCK;
+@@ -275,6 +329,14 @@ static __global__ void lightning_indexer_kernel_vec(
+     // each warp processes K_VECS_PER_WARP K vectors
+     const int start_kv_block = blockIdx.x * K_VECS_PER_BLOCK;
+     const int start_kv = start_kv_block + i_warp * K_VECS_PER_WARP;
++    const float nvis = NV ? *(const float *) ((const char *) NV + i_batch*nbm1 + (i_stream%nem3)*nbm3) : INFINITY;
++    if (!(start_kv_block < nvis)) { // uniform across the block; no Q/K reads or barriers
++        if (tid < K_VECS_PER_BLOCK && start_kv_block + tid < n_kv) {
++            float * dst_base = (float *) ((char *) dst + i_batch*nb1 + i_stream*nb3);
++            dst_base[start_kv_block + tid] = -INFINITY;
++        }
++        return;
++    }
+ 
+     const char  * q_base = (const char  *)                 Q + i_batch*nbq2 + i_stream*nbq3;
+     const float * w_base = (const float *) ((const char *) W + i_batch*nbw1 + i_stream*nbw3);
+@@ -288,7 +350,7 @@ static __global__ void lightning_indexer_kernel_vec(
+ #pragma unroll
+         for (int k = 0; k < K_VECS_PER_WARP; ++k) {
+             int i_kv = start_kv + k;
+-            if (i_kv < n_kv) {
++            if (i_kv < n_kv && i_kv < nvis) {
+                 const float4 * k_base = (const float4 *) ((const char *) K + i_kv*nbk2 + i_stream*nbk3);
+                 k_reg_f[k] = k_base[i_lane];
+             } else {
+@@ -301,7 +363,7 @@ static __global__ void lightning_indexer_kernel_vec(
+ #pragma unroll
+         for (int k = 0; k < K_VECS_PER_WARP; ++k) {
+             int i_kv = start_kv + k;
+-            if (i_kv < n_kv) {
++            if (i_kv < n_kv && i_kv < nvis) {
+                 const void * k_base = (const void *) ((const char *) K + i_kv*nbk2 + i_stream*nbk3);
+                 dequantize_k(k_base, &k_reg_f[k], i_lane * 4);
+             } else {
+@@ -386,13 +448,30 @@ static __global__ void lightning_indexer_kernel_vec(
+     if (tid < K_VECS_PER_BLOCK) {
+         int i_kv = start_kv_block + tid;
+         if (i_kv < n_kv) {
+-            const half * m_base = (const half *) ((const char *) M + i_batch*nbm1 + (i_stream%nem3)*nbm3);
++            const half * m_base = M ? (const half *) ((const char *) M + i_batch*nbm1 + (i_stream%nem3)*nbm3) : nullptr;
+             float * dst_base = (float *) ((char *) dst + i_batch*nb1 + i_stream*nb3);
+-            dst_base[i_kv] = dst_shared[tid] + __half2float(m_base[i_kv]);
++            dst_base[i_kv] = i_kv < nvis ? dst_shared[tid] + (NV ? 0.0f : __half2float(m_base[i_kv])) : -INFINITY;
+         }
+     }
+ }
+ 
++template <int WARPS_PER_BLOCK, int K_VECS_PER_BLOCK, int64_t N_EMBD, int64_t N_HEAD, ggml_type TYPE_K>
++static __global__ void lightning_indexer_kernel_vec(
++        const float * Q, const char * K, const float * W, const half * M, float * dst,
++        int64_t n_stream, int64_t n_batch, int64_t n_kv,
++        size_t nb1, size_t nb2, size_t nb3,
++        size_t nbq1, size_t nbq2, size_t nbq3,
++        size_t nbk1, size_t nbk2, size_t nbk3,
++        size_t nbw1, size_t nbw2, size_t nbw3,
++        size_t nbm1, size_t nbm2, size_t nbm3,
++        int64_t nem3, const float * NV
++    ) {
++    lightning_indexer_vec<WARPS_PER_BLOCK, K_VECS_PER_BLOCK, N_EMBD, N_HEAD, TYPE_K>(
++        Q, K, W, M, dst, n_stream, n_batch, n_kv,
++        nb1, nb2, nb3, nbq1, nbq2, nbq3, nbk1, nbk2, nbk3, nbw1, nbw2, nbw3,
++        nbm1, nbm2, nbm3, nem3, NV);
++}
++
+ // one block scores a tile of K_VECS_PER_BLOCK keys against TOKENS_PER_BLOCK tokens: the keys are
+ // staged in half precision and the queries of every head in float, each thread owns KEYS_PER_THREAD
+ // keys for one token, a warp shares its token so the query reads are broadcasts, and every key
+@@ -552,6 +631,22 @@ static __global__ void lightning_indexer_kernel_tile(
+ }
+ 
+ #define LIGHTNING_INDEXER_CASE(lightning_indexer_kernel, n_embd, n_head, K, type_K)         \
++    if (K->type == (type_K)) {                                                              \
++        lightning_indexer_kernel<WARPS_PER_BLOCK, K_VECS_PER_BLOCK, n_embd, n_head, type_K> \
++            <<<grid, block, 0, ctx.stream()>>>(                                             \
++            q_d, k_d, w_d, m_d, dst_d,                                                      \
++            n_stream, n_batch, n_kv,                                                        \
++            nb1, nb2, nb3,                                                                  \
++            nbq1, nbq2, nbq3,                                                               \
++            nbk1, nbk2, nbk3,                                                               \
++            nbw1, nbw2, nbw3,                                                               \
++            nbm1, nbm2, nbm3,                                                               \
++            nem3, nv_d                                                                      \
++        );                                                                                  \
++    } else
++
++// the upstream tile kernel takes no visibility counts: it is only dispatched with an additive mask
++#define LIGHTNING_INDEXER_CASE_TILE(lightning_indexer_kernel, n_embd, n_head, K, type_K)   \
+     if (K->type == (type_K)) {                                                              \
+         lightning_indexer_kernel<WARPS_PER_BLOCK, K_VECS_PER_BLOCK, n_embd, n_head, type_K> \
+             <<<grid, block, 0, ctx.stream()>>>(                                             \
+@@ -575,7 +670,7 @@ void ggml_cuda_lightning_indexer(ggml_backend_cuda_context & ctx, ggml_tensor *
+     GGML_ASSERT(dst->type == GGML_TYPE_F32);
+     GGML_ASSERT(  q->type == GGML_TYPE_F32);
+     GGML_ASSERT(  w->type == GGML_TYPE_F32);
+-    GGML_ASSERT(  m->type == GGML_TYPE_F16);
++    GGML_ASSERT(  m->type == GGML_TYPE_F16 || m->type == GGML_TYPE_F32);
+ 
+     GGML_TENSOR_LOCALS(int64_t, neq,  q, ne)
+     GGML_TENSOR_LOCALS(size_t,  nbq,  q, nb)
+@@ -609,15 +704,20 @@ void ggml_cuda_lightning_indexer(ggml_backend_cuda_context & ctx, ggml_tensor *
+     const float *   q_d = (const float *)   q->data;
+     const char  *   k_d = (const char  *)   k->data;
+     const float *   w_d = (const float *)   w->data;
+-    const half  *   m_d = (const half  *)   m->data;
++    const half  *   m_d = m->type == GGML_TYPE_F16 ? (const half *) m->data : nullptr;
++    const float * nv_d = m->type == GGML_TYPE_F32 ? (const float *) m->data : nullptr;
+     float       * dst_d = (      float *) dst->data;
+ 
+     const int device = ggml_cuda_get_device();
+     const int cc     = ggml_cuda_info().devices[device].cc;
++    // Opt-in until other NVIDIA generations have the same accuracy/performance gate.
++    const char * mx_env = std::getenv("GGML_CUDA_MXFP4_WMMA");
++    const bool mx_wmma = mx_env && std::atoi(mx_env) != 0;
++    const bool force_vec = std::getenv("GGML_CUDA_INDEXER_VEC") != nullptr;
+ 
+     if (n_embd == 128 && n_head == 64) {
+ #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+-        if (GGML_CUDA_CC_IS_NVIDIA(cc) && turing_mma_available(cc) && k->type != GGML_TYPE_F32 && k->type != GGML_TYPE_BF16) {
++        if (!force_vec && GGML_CUDA_CC_IS_NVIDIA(cc) && turing_mma_available(cc) && k->type != GGML_TYPE_F32 && k->type != GGML_TYPE_BF16 && (k->type != GGML_TYPE_MXFP4 || mx_wmma)) {
+             // use wmma kernel
+             constexpr int K_VECS_PER_BLOCK = 32;
+             constexpr int WARPS_PER_BLOCK = 8;
+@@ -632,6 +732,7 @@ void ggml_cuda_lightning_indexer(ggml_backend_cuda_context & ctx, ggml_tensor *
+             LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_wmma, 128, 64, k, GGML_TYPE_Q5_0)
+             LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_wmma, 128, 64, k, GGML_TYPE_Q5_1)
+             LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_wmma, 128, 64, k, GGML_TYPE_Q8_0)
++            LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_wmma, 128, 64, k, GGML_TYPE_MXFP4)
+             GGML_ABORT("fatal error");
+         } else {
+ #else // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+@@ -653,12 +754,14 @@ void ggml_cuda_lightning_indexer(ggml_backend_cuda_context & ctx, ggml_tensor *
+             LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 64, k, GGML_TYPE_Q5_1)
+             LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 64, k, GGML_TYPE_Q8_0)
+             LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 64, k, GGML_TYPE_BF16)
++            // MXFP4 defaults to vec; GGML_CUDA_MXFP4_WMMA=1 enables the checked fp16 path.
++            LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 64, k, GGML_TYPE_MXFP4)
+             LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 64, k, GGML_TYPE_F32)
+             GGML_ABORT("fatal error");
+         }
+     } else if (n_embd == 128 && n_head == 32) {
+ #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+-        if (GGML_CUDA_CC_IS_NVIDIA(cc) && turing_mma_available(cc) && k->type != GGML_TYPE_F32 && k->type != GGML_TYPE_BF16) {
++        if (!force_vec && GGML_CUDA_CC_IS_NVIDIA(cc) && turing_mma_available(cc) && k->type != GGML_TYPE_F32 && k->type != GGML_TYPE_BF16 && (k->type != GGML_TYPE_MXFP4 || mx_wmma)) {
+             // use wmma kernel
+             constexpr int K_VECS_PER_BLOCK = 32;
+             constexpr int WARPS_PER_BLOCK = 8;
+@@ -673,6 +776,7 @@ void ggml_cuda_lightning_indexer(ggml_backend_cuda_context & ctx, ggml_tensor *
+             LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_wmma, 128, 32, k, GGML_TYPE_Q5_0)
+             LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_wmma, 128, 32, k, GGML_TYPE_Q5_1)
+             LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_wmma, 128, 32, k, GGML_TYPE_Q8_0)
++            LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_wmma, 128, 32, k, GGML_TYPE_MXFP4)
+             GGML_ABORT("fatal error");
+         } else {
+ #else // !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+@@ -694,11 +798,14 @@ void ggml_cuda_lightning_indexer(ggml_backend_cuda_context & ctx, ggml_tensor *
+             LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 32, k, GGML_TYPE_Q5_1)
+             LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 32, k, GGML_TYPE_Q8_0)
+             LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 32, k, GGML_TYPE_BF16)
++            // MXFP4 defaults to vec; GGML_CUDA_MXFP4_WMMA=1 enables the checked fp16 path.
++            LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 32, k, GGML_TYPE_MXFP4)
+             LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_vec, 128, 32, k, GGML_TYPE_F32)
+             GGML_ABORT("fatal error");
+         }
+-    } else if (n_embd == 128 && n_head == 4 && n_batch >= LIGHTNING_INDEXER_TILE_TOKENS) {
++    } else if (n_embd == 128 && n_head == 4 && n_batch >= LIGHTNING_INDEXER_TILE_TOKENS && nv_d == nullptr) {
+         // too few heads for a wmma tile, the tile kernel shares the keys across the tokens
++        // (visible-key counts are not passed to the tile kernel, so they take the vec path below)
+         constexpr int WARPS_PER_BLOCK = 8;
+         constexpr int K_VECS_PER_BLOCK = 64;
+ 
+@@ -707,14 +814,14 @@ void ggml_cuda_lightning_indexer(ggml_backend_cuda_context & ctx, ggml_tensor *
+         int num_batch_blocks = (n_batch + LIGHTNING_INDEXER_TILE_TOKENS - 1) / LIGHTNING_INDEXER_TILE_TOKENS;
+         dim3 grid(num_kv_blocks, num_batch_blocks, n_stream);
+ 
+-        LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_tile, 128, 4, k, GGML_TYPE_F16)
+-        LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_tile, 128, 4, k, GGML_TYPE_Q4_0)
+-        LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_tile, 128, 4, k, GGML_TYPE_Q4_1)
+-        LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_tile, 128, 4, k, GGML_TYPE_Q5_0)
+-        LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_tile, 128, 4, k, GGML_TYPE_Q5_1)
+-        LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_tile, 128, 4, k, GGML_TYPE_Q8_0)
+-        LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_tile, 128, 4, k, GGML_TYPE_BF16)
+-        LIGHTNING_INDEXER_CASE(lightning_indexer_kernel_tile, 128, 4, k, GGML_TYPE_F32)
++        LIGHTNING_INDEXER_CASE_TILE(lightning_indexer_kernel_tile, 128, 4, k, GGML_TYPE_F16)
++        LIGHTNING_INDEXER_CASE_TILE(lightning_indexer_kernel_tile, 128, 4, k, GGML_TYPE_Q4_0)
++        LIGHTNING_INDEXER_CASE_TILE(lightning_indexer_kernel_tile, 128, 4, k, GGML_TYPE_Q4_1)
++        LIGHTNING_INDEXER_CASE_TILE(lightning_indexer_kernel_tile, 128, 4, k, GGML_TYPE_Q5_0)
++        LIGHTNING_INDEXER_CASE_TILE(lightning_indexer_kernel_tile, 128, 4, k, GGML_TYPE_Q5_1)
++        LIGHTNING_INDEXER_CASE_TILE(lightning_indexer_kernel_tile, 128, 4, k, GGML_TYPE_Q8_0)
++        LIGHTNING_INDEXER_CASE_TILE(lightning_indexer_kernel_tile, 128, 4, k, GGML_TYPE_BF16)
++        LIGHTNING_INDEXER_CASE_TILE(lightning_indexer_kernel_tile, 128, 4, k, GGML_TYPE_F32)
+         GGML_ABORT("fatal error");
+     } else if (n_embd == 128 && n_head == 4) {
+         // a batch smaller than a token tile, use vector kernel
+@@ -788,6 +895,7 @@ bool ggml_cuda_lightning_indexer_supported(int device, const ggml_tensor * dst)
+         case GGML_TYPE_Q5_0:
+         case GGML_TYPE_Q4_1:
+         case GGML_TYPE_Q4_0:
++        case GGML_TYPE_MXFP4:   // Strata DS4.1 --kv-fp4
+             return true;
+         default:
+             return false;
+diff --git a/ggml/src/ggml-cuda/mmq.cuh b/ggml/src/ggml-cuda/mmq.cuh
+index 565ed1481f8ff44629002690bd6cccdf7c975f0f..838e2f1a5be6edc2f0c477be1cebad63aec6d8f0 100644
+--- a/ggml/src/ggml-cuda/mmq.cuh
++++ b/ggml/src/ggml-cuda/mmq.cuh
+@@ -264,6 +264,12 @@ static __host__ ggml_cuda_mmq_config ggml_cuda_mmq_get_config(const ggml_type ty
+     return ggml_cuda_mmq_get_config_pascal_older(type, J, fallback);
+ }
+ 
++// xolotl: the pre-upgrade form of the host config lookup (src/prefill/moe_mmq.cu), which asks only whether a tile
++// exists for this card. Same answer as before src1 precision became part of the key: the config with src1 at Q8_1.
++static __host__ ggml_cuda_mmq_config ggml_cuda_mmq_get_config(const ggml_type type, const int J, const bool fallback, const int cc) {
++    return ggml_cuda_mmq_get_config(type, J, fallback, cc, GGML_PREC_Q8);
++}
++
+ static constexpr __device__ ggml_cuda_mmq_config ggml_cuda_mmq_get_config(ggml_type type, int J, bool fallback, ggml_prec prec_src1) {
+ #ifdef GGML_USE_HIP
+ #ifdef GCN
+@@ -1502,7 +1508,17 @@ static void launch_mul_mat_q(ggml_backend_cuda_context & ctx, const mmq_args & a
+     GGML_ASSERT(ntiles_dst * blocks_per_ne00_fd.z < (1 << 30)); // Assert that variable kbc will not overflow.
+ 
+     const int nwork = ntiles_dst * ((args.ncols_x + config.K_vram - 1) / config.K_vram); // Maximum number of CUDA blocks that can do useful work.
+-    const dim3 block_nums_stream_k(GGML_CUDA_CC_IS_NVIDIA(cc) && tiles_efficiency_percent >= 90 ? ntiles_dst : std::min(nsm, nwork), 1, 1);
++    // Strata-DS4 (tools/v41/ggml/mmq-deterministic.patch): for the MoE products (expert_bounds set) the stream-k split
++    // depends on how many tiles the launch holds, i.e. on which experts share it, so a tile's K sum is cut at different
++    // points when the caller groups experts by free VRAM (Strata's prefill: the prestage region and the transcode
++    // scratch) - the prompt's logits then change with what else is on the card.  One CUDA block per tile keeps every
++    // output's K order fixed.  GGML_CUDA_MMQ_STREAM_K_MOE=1 restores the split.
++    static const bool moe_stream_k = [] {
++        const char * v = getenv("GGML_CUDA_MMQ_STREAM_K_MOE");
++        return v && v[0] == '1';
++    }();
++    const bool tile_only = args.expert_bounds != nullptr && !moe_stream_k;
++    const dim3 block_nums_stream_k(tile_only || (GGML_CUDA_CC_IS_NVIDIA(cc) && tiles_efficiency_percent >= 90) ? ntiles_dst : std::min(nsm, nwork), 1, 1);
+ 
+     const bool fixup_needed = ntiles_dst % block_nums_stream_k.x != 0;
+ 
+@@ -1613,6 +1629,13 @@ void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cuda
+     }
+ }
+ 
++// xolotl: the pre-upgrade entry point (src/prefill/moe_mmq.cu and src/prefill/mmq_nvfp4_w4a8.cu), selected before
++// src1 precision became a template parameter. The W4A8 path keeps src1 at Q8_1, which is what it asked for.
++template <ggml_type type>
++void mul_mat_q_case(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
++    mul_mat_q_case<type, GGML_PREC_Q8>(ctx, args, stream);
++}
++
+ #define DECL_MMQ_CASE(type)                                                        \
+     template void mul_mat_q_case<type, GGML_PREC_Q8>(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) \
+ 
+diff --git a/ggml/src/ggml-cuda/set-rows.cu b/ggml/src/ggml-cuda/set-rows.cu
+index 4659970651e59538842d72cfb4d30815c1fd7f25..57cdad285dc1dba7d8de3861026b68725e8e4a41 100644
+--- a/ggml/src/ggml-cuda/set-rows.cu
++++ b/ggml/src/ggml-cuda/set-rows.cu
+@@ -317,6 +317,26 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
+             nb1, nb2, nb3,
+             stream
+         );
++    } else if (dst->type == GGML_TYPE_NVFP4) {   // Strata DS4.1 --kv-fp4: exact packing of fake-quantized rows
++        set_rows_cuda_quant<idx_t, block_nvfp4, QK_NVFP4, quantize_f32_nvfp4_ds41_block>(
++            src0_d, src1_d, (block_nvfp4*)dst->data,
++            ne00, ne01, ne02, ne03,
++            ne10, ne11, ne12, ne13,
++            nb01, nb02, nb03,
++            nb10, nb11, nb12,
++            nb1, nb2, nb3,
++            stream
++        );
++    } else if (dst->type == GGML_TYPE_MXFP4) {   // Strata DS4.1 --kv-fp4
++        set_rows_cuda_quant<idx_t, block_mxfp4, QK_MXFP4, quantize_f32_mxfp4_ds41_block>(
++            src0_d, src1_d, (block_mxfp4*)dst->data,
++            ne00, ne01, ne02, ne03,
++            ne10, ne11, ne12, ne13,
++            nb01, nb02, nb03,
++            nb10, nb11, nb12,
++            nb1, nb2, nb3,
++            stream
++        );
+     } else {
+         GGML_ABORT("unsupported type %s", ggml_type_name(dst->type));
+     }
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index 33936acae8cda3dce408c76d172dcaa17b658ec3..cb6ff367c86c53c398cc2f81f18bc741b089713a 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -16029,7 +16029,7 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
+ 
+                 // the q/w/m types and the shape relationships between q, k, w, m and dst
+                 // are already asserted in ggml_lightning_indexer()
+-                if (!ggml_vk_lightning_indexer_k_type_supported(k->type) || !device->fp16) {
++                if (m->type != GGML_TYPE_F16 || !ggml_vk_lightning_indexer_k_type_supported(k->type) || !device->fp16) {
+                     return false;
+                 }
+ 
+diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
+index ed8554b14173c6141261d79e7d3353e37e5af963..0483745912a1beb228f45983f38f30e82a3a5f7b 100644
+--- a/ggml/src/ggml.c
++++ b/ggml/src/ggml.c
+@@ -1093,6 +1093,8 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
+     "DSV4_HC_PRE",
+     "DSV4_HC_POST",
+     "TOP_K_MASK",
++    "DSV41_FAKE_QUANT",
++    "DSV41_HC_MIXES",
+ 
+     "UNARY",
+ 
+@@ -1110,7 +1112,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
+     "GLU",
+ };
+ 
+-static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
++static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
+ 
+ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "none",
+@@ -1209,6 +1211,8 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "dsv4_hc_pre(x, weights)",
+     "dsv4_hc_post(x, residual, post, comb)",
+     "top_k_mask(mask, top_k, score, blocks, extra)",
++    "dsv41_fake_quant(x)",
++    "dsv41_hc_mixes(mixes, scale, base)",
+ 
+     "unary(x)",
+ 
+@@ -1226,7 +1230,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "glu(x)",
+ };
+ 
+-static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
++static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
+ 
+ static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
+ 
+@@ -5498,6 +5502,9 @@ struct ggml_tensor * ggml_argsort_top_k(
+     GGML_ASSERT(a->ne[0] >= k);
+ 
+     struct ggml_tensor * result = ggml_argsort(ctx, a, GGML_SORT_ORDER_DESC);
++    // Strata-DS4 (tools/v41/ggml/rank-argsort.patch): only the first k of each row are read (the view below) - a
++    // backend may select them instead of sorting the whole row (CUDA: k <= 32, ggml-cuda/argsort.cu)
++    ggml_set_op_params_i32(result, 1, k);
+ 
+     result = ggml_view_4d(ctx, result,
+                 k, result->ne[1], result->ne[2], result->ne[3],
+@@ -6482,9 +6489,9 @@ struct ggml_tensor * ggml_lightning_indexer(
+ 
+     GGML_ASSERT(       q->type == GGML_TYPE_F32);
+     GGML_ASSERT( weights->type == GGML_TYPE_F32);
+-    GGML_ASSERT(    mask->type == GGML_TYPE_F16);
++    GGML_ASSERT(    mask->type == GGML_TYPE_F16 || mask->type == GGML_TYPE_F32);
+     GGML_ASSERT(      q->ne[0] == k->ne[0]);
+-    GGML_ASSERT(   mask->ne[0] == k->ne[2]);
++    GGML_ASSERT(   mask->ne[0] == (mask->type == GGML_TYPE_F32 ? 1 : k->ne[2]));
+     GGML_ASSERT(      q->ne[1] == weights->ne[0]);
+     GGML_ASSERT(      k->ne[1] == 1);
+     GGML_ASSERT(   mask->ne[1] == q->ne[2]);
+@@ -6598,6 +6605,42 @@ static struct ggml_tensor * ggml_dsv4_hc_pre_impl(
+     return result;
+ }
+ 
++struct ggml_tensor * ggml_dsv41_fake_quant(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * a,
++        int                   mode) {
++    GGML_ASSERT(a->type == GGML_TYPE_F32 && ggml_is_contiguous(a));
++    GGML_ASSERT(mode >= 0 && mode <= 2);
++    GGML_ASSERT(ggml_nelements(a) % (mode == 1 ? 16 : 32) == 0);
++    struct ggml_tensor * result = ggml_dup_tensor(ctx, a);
++    ggml_set_op_params_i32(result, 0, mode);
++    result->op     = GGML_OP_DSV41_FAKE_QUANT;
++    result->src[0] = a;
++    return result;
++}
++
++struct ggml_tensor * ggml_dsv41_hc_mixes(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * mixes,
++        struct ggml_tensor  * scale,
++        struct ggml_tensor  * base,
++        float                 eps) {
++    GGML_ASSERT(mixes->type == GGML_TYPE_F32 && ggml_is_contiguous(mixes));
++    GGML_ASSERT(scale->type == GGML_TYPE_F32 && ggml_nelements(scale) == 2);
++    GGML_ASSERT(base->type  == GGML_TYPE_F32 && ggml_is_contiguous(base));
++    GGML_ASSERT(base->ne[0] % 2 == 0);
++    const int64_t hc = base->ne[0] / 2;
++    const int64_t nt = mixes->ne[1] * mixes->ne[2] * mixes->ne[3];
++    GGML_ASSERT(mixes->ne[0] >= 2*hc);   // a Block.hc_mixes mixes tensor also carries the hc*hc comb rows after them
++    struct ggml_tensor * result = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, hc, 2*nt);
++    ggml_set_op_params_f32(result, 0, eps);
++    result->op     = GGML_OP_DSV41_HC_MIXES;
++    result->src[0] = mixes;
++    result->src[1] = scale;
++    result->src[2] = base;
++    return result;
++}
++
+ struct ggml_tensor * ggml_dsv4_hc_pre(
+         struct ggml_context * ctx,
+         struct ggml_tensor  * x,

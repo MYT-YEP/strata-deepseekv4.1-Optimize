@@ -1,0 +1,9 @@
+{
+  "id": "launch-deepseek-harness-64k",
+  "overrides": {
+    "host": "127.0.0.1",
+    "port": 8080
+  },
+  "schema_version": 1,
+  "source_config": "F:\\STRATA\\localappdata\\Strata\\launch\\deepseek-harness-64k.json"
+}

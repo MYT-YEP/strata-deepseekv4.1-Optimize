@@ -1,0 +1,27 @@
+# Private/runtime state and large weights must never be added by accident.
+*.gguf
+*.gguf.*
+*.credentials.yaml
+*.credentials.yml
+*.pem
+*.key
+*.env
+.env
+node_modules/
+!reproduction/overlay/toolchains/node-24.14.0/node_modules/
+reproduction/overlay/toolchains/node-24.14.0/node_modules/*
+!reproduction/overlay/toolchains/node-24.14.0/node_modules/npm/
+reproduction/overlay/toolchains/node-24.14.0/node_modules/npm/*
+!reproduction/overlay/toolchains/node-24.14.0/node_modules/npm/npmrc
+sessions/
+storages/
+__pycache__/
+*.py[cod]
+*.log
+*.part
+*.repro-part
+*.repro-source.json
+*.chunks
+*.src
+*.zip
+*.tar.gz

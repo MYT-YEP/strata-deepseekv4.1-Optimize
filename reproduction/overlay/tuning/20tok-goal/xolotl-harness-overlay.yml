@@ -1,0 +1,32 @@
+# Local output tuning: 64K context, 16K output. Preset snapshots match installed dsh 0.2.1-rc.2.
+- id: llm-deepseek
+  config:
+    baseURL: http://127.0.0.1:8150
+    apiKeyEnv: STRATA_LOCAL_API_KEY
+    thinking: enabled
+    reasoningEffort: 'off'
+    maxTokens: 16384
+    models:
+      - id: deepseek-v4.1-flash
+        contextWindow: 65536
+        maxTokens: 16384
+        inputModalities:
+          - text
+    defaultContextWindow: 65536
+
+- id: tool-pwsh
+  disabled: true
+- id: tool-bash
+  disabled: true
+- id: tool-jobs
+  disabled: true
+- id: tool-web
+  disabled: true
+- id: tool-skill
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-subagent-control
+  disabled: true

@@ -1,0 +1,125 @@
+{
+  "label": "selected-live-warm-20261029-101326-16980",
+  "round": 1,
+  "start_time": "2026-10-29T10:13:39.480519+08:00",
+  "health": {
+    "status": "ok",
+    "max_context": 65536,
+    "model": "deepseek-v4.1-flash",
+    "display_name": null,
+    "images": false,
+    "api_key": false,
+    "image_generation": false,
+    "loaded": true,
+    "service": "strata"
+  },
+  "max_tokens": 768,
+  "settings": {
+    "temperature": 0,
+    "reasoning_effort": "none"
+  },
+  "cases": [
+    {
+      "name": "zh_privacy",
+      "prompt": "请面向普通电脑用户，用中文说明本地运行大模型的隐私优势、速度限制、内存和硬盘的不同作用，以及两种适合与两种不适合的应用。每个要点举一个具体例子，约400到600字。不要编造硬件测量结果。",
+      "answer": "对普通电脑用户来说，本地运行大模型最直接的隐私优势是数据不离开电脑：提示词、文档、聊天记录都在本机处理，不必上传云端。例如把合同草稿交给本地模型做摘要，内容只留在自己硬盘上，而不是进入第三方服务器。代价是速度限制明显：本地模型受显卡、内存带宽和模型规模影响，长文生成或复杂推理往往比云端慢；例如用本地7B级模型连续生成2000字报告，可能要等数十秒到数分钟，且并发能力弱。内存主要决定“能不能装下并流畅运行”：内存不足时模型会加载失败、换页频繁或响应很慢；例如8GB内存机器跑较大模型容易卡顿，而较小模型更顺畅。硬盘则决定“模型和资料能否长期保存”：模型权重占空间，本地知识库也占空间；例如把几GB的模型文件放在SSD上，启动和读取通常比机械硬盘更顺，但容量不足就无法保存多个模型。适合的应用：一是个人文档摘要与改写，例如把本地笔记、简历草稿交给本地模型润色，避免外传；二是离线敏感资料问答，例如在断网环境用本地知识库检索内部手册。不适合的应用：一是高并发多人服务，例如公司几十人同时使用一个本地模型做客服，普通电脑难以承受；二是超长上下文或高难度推理，例如让本地模型一次分析数百页合同并做复杂比对，速度和内存都容易成为瓶颈。",
+      "finish_reason": "stop",
+      "usage": {
+        "prompt_tokens": 57,
+        "completion_tokens": 318,
+        "total_tokens": 375,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 57,
+        "prompt_ms": 5769.6,
+        "prompt_per_token_ms": 101.221,
+        "prompt_per_second": 9.9,
+        "predicted_n": 318,
+        "predicted_ms": 20962.4,
+        "predicted_per_token_ms": 65.919,
+        "predicted_per_second": 15.2,
+        "draft_n": 0,
+        "draft_n_accepted": 0
+      },
+      "first_text_seconds": 5.817,
+      "elapsed_seconds": 26.78,
+      "stream_completed": true,
+      "python_syntax_valid": null
+    },
+    {
+      "name": "python_unique",
+      "prompt": "请写一个完整的 Python 3 函数 stable_unique(items)，对可哈希元素按首次出现顺序去重，不修改原列表。加入类型提示、简短文档字符串和不少于六个覆盖空输入、重复项、字符串及负数的 assert 测试；解释时间和空间复杂度。",
+      "answer": "下面是完整实现：\n\n```python\nfrom typing import Hashable, Iterable, List, TypeVar\n\nT = TypeVar(\"T\", bound=Hashable)\n\n\ndef stable_unique(items: Iterable[T]) -> List[T]:\n    \"\"\"Return a list of hashable items with duplicates removed, preserving\n    first-occurrence order. The original input is not modified.\n\n    Time complexity: O(n) average, where n = number of items.\n    Space complexity: O(n) for the output list and the seen set.\n    \"\"\"\n    seen = set()\n    result: List[T] = []\n    for item in items:\n        if item not in seen:\n            seen.add(item)\n            result.append(item)\n    return result\n\n\n# --- tests ---\nassert stable_unique([]) == []\nassert stable_unique([1, 2, 1, 3, 2, 1]) == [1, 2, 3]\nassert stable_unique([\"a\", \"b\", \"a\", \"c\", \"b\"]) == [\"a\", \"b\", \"c\"]\nassert stable_unique([-1, -2, -1, -3, -2]) == [-1, -2, -3]\nassert stable_unique([0, 0, 0]) == [0]\nassert stable_unique([None, None, 1, None, 2]) == [None, 1, 2]\n```\n\n**复杂度说明**\n\n- **时间**：平均 `O(n)`，因为每个元素对 `set` 的成员检查和插入平均为 `O(1)`；最坏情况下受哈希冲突影响，但通常按平均 `O(n)` 计。\n- **空间**：`O(n)`，`seen` 集合最多保存 `n` 个不同元素，`result` 列表保存去重后的元素；输入本身不被修改。\n\n**要点**\n\n- 使用 `set` 记录已见元素，遍历一次即可保持首次出现顺序。\n- 返回新列表，原输入（列表或其他可迭代对象）不被修改。\n- 仅适用于可哈希元素；若元素不可哈希（如列表、字典），该函数会抛出 `TypeError`。",
+      "finish_reason": "stop",
+      "usage": {
+        "prompt_tokens": 63,
+        "completion_tokens": 455,
+        "total_tokens": 518,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 63,
+        "prompt_ms": 5418.3,
+        "prompt_per_token_ms": 86.005,
+        "prompt_per_second": 11.6,
+        "predicted_n": 455,
+        "predicted_ms": 23028.2,
+        "predicted_per_token_ms": 50.611,
+        "predicted_per_second": 19.8,
+        "draft_n": 0,
+        "draft_n_accepted": 0
+      },
+      "first_text_seconds": 5.466,
+      "elapsed_seconds": 28.494,
+      "stream_completed": true,
+      "python_syntax_valid": true
+    },
+    {
+      "name": "en_backpressure",
+      "prompt": "Explain how to design backpressure in an asynchronous web service that calls a local language model. Discuss bounded queues, cancellation, deadlines, resource limits, and observability, using one concrete example for each. Keep the answer practical and roughly 300 words.",
+      "answer": "Designing backpressure for an async service that calls a local LLM means controlling how many requests are admitted, how long they wait, and how they fail fast rather than overwhelming the model.\n\n**Bounded queues.** Put an explicit limit on pending work, e.g., an `asyncio.Queue(maxsize=64)` in front of the model worker. If producers try to enqueue beyond that, reject immediately with `503`/`429` instead of letting memory grow. This gives you a clear admission-control point.\n\n**Cancellation.** When a client disconnects or a request is superseded, cancel the in-flight task. Example: wrap the LLM call in a task and call `task.cancel()` on client disconnect; the worker should catch `CancelledError`, stop generation, and release the slot. This prevents wasted GPU time on abandoned requests.\n\n**Deadlines.** Apply both queue-wait and inference deadlines. Example: a request may wait at most 200 ms in the queue and the model call may run at most 8 s; use `asyncio.wait_for(...)`. If the deadline expires, return `504` and free the concurrency slot.\n\n**Resource limits.** Bound concurrency to the model’s real capacity, not just request count. Example: a semaphore of 4 around the local LLM because it can safely run four generations at once; additional requests queue or are rejected. Also cap tokens/context size per request.\n\n**Observability.** Emit metrics: queue depth, wait time, rejection rate, active model slots, deadline expirations, cancellations, and p95 latency. Example: log a structured event when a request is rejected due to `queue_full`, and alert when rejection rate or queue wait exceeds thresholds.\n\nPractical pattern: admit only if queue has space and deadline budget remains; acquire the model semaphore; run with timeout and cancellation; always release permits in `finally`; expose metrics and tune limits from load tests.",
+      "finish_reason": "stop",
+      "usage": {
+        "prompt_tokens": 54,
+        "completion_tokens": 407,
+        "total_tokens": 461,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "timings": {
+        "cache_n": 0,
+        "prompt_n": 54,
+        "prompt_ms": 6138.1,
+        "prompt_per_token_ms": 113.669,
+        "prompt_per_second": 8.8,
+        "predicted_n": 407,
+        "predicted_ms": 19183.0,
+        "predicted_per_token_ms": 47.133,
+        "predicted_per_second": 21.2,
+        "draft_n": 0,
+        "draft_n_accepted": 0
+      },
+      "first_text_seconds": 6.185,
+      "elapsed_seconds": 25.368,
+      "stream_completed": true,
+      "python_syntax_valid": null
+    }
+  ],
+  "summary": {
+    "output_tokens": 1180,
+    "decode_seconds": 63.174,
+    "elapsed_seconds": 80.642,
+    "weighted_decode_tps": 18.679,
+    "end_to_end_output_tps": 14.633,
+    "minimum_decode_tps": 15.2,
+    "median_decode_tps": 19.8
+  }
+}

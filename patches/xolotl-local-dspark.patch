@@ -1,0 +1,170 @@
+diff --git a/tools/v41/engine/ds41_dspark.cpp b/tools/v41/engine/ds41_dspark.cpp
+index 6c74f7c7dd823fb4ef69e7a6cfbb6c087f89c216..7152901844cfce545f835831ce1ab0b6a13fdab6 100644
+--- a/tools/v41/engine/ds41_dspark.cpp
++++ b/tools/v41/engine/ds41_dspark.cpp
+@@ -105,6 +105,109 @@ bool Ds41DSpark::Impl::load(std::string & e) {
+     for (size_t s = 0; s < side->size(); ++s)
+         for (const auto & ti : side->shard(s).tensors())
+             if (ti.name.rfind("mtp.", 0) == 0) src.push_back({ side.get(), &ti });
++    // F: local adapter for unsloth dflash. Keep the source TensorInfo and file
++    // offsets; only give the existing tensor a checkpoint-style lookup name.
++    std::map<const TensorInfo *, std::string> aliases;
++    if (src.empty()) {
++        static const std::map<std::string, std::string> dflash_alias = {
++            { "blk.0.attn_kv.weight", "mtp.0.attn.wkv.weight" },
++            { "blk.0.attn_kv_a_norm.weight", "mtp.0.attn.kv_norm.weight" },
++            { "blk.0.attn_norm.weight", "mtp.0.attn_norm.weight" },
++            { "blk.0.attn_output_a.weight", "mtp.0.attn.wo_a.weight" },
++            { "blk.0.attn_output_b.weight", "mtp.0.attn.wo_b.weight" },
++            { "blk.0.attn_q_a.weight", "mtp.0.attn.wq_a.weight" },
++            { "blk.0.attn_q_a_norm.weight", "mtp.0.attn.q_norm.weight" },
++            { "blk.0.attn_q_b.weight", "mtp.0.attn.wq_b.weight" },
++            { "blk.0.attn_sinks.weight", "mtp.0.attn.attn_sink" },
++            { "blk.0.exp_probs_b.bias", "mtp.0.ffn.gate.bias" },
++            { "blk.0.ffn_down_exps.weight", "mtp.0.ffn.experts.w2.weight" },
++            { "blk.0.ffn_down_shexp.weight", "mtp.0.ffn.shared_experts.w2.weight" },
++            { "blk.0.ffn_gate_exps.weight", "mtp.0.ffn.experts.w1.weight" },
++            { "blk.0.ffn_gate_inp.weight", "mtp.0.ffn.gate.weight" },
++            { "blk.0.ffn_gate_shexp.weight", "mtp.0.ffn.shared_experts.w1.weight" },
++            { "blk.0.ffn_norm.weight", "mtp.0.ffn_norm.weight" },
++            { "blk.0.ffn_up_exps.weight", "mtp.0.ffn.experts.w3.weight" },
++            { "blk.0.ffn_up_shexp.weight", "mtp.0.ffn.shared_experts.w3.weight" },
++            { "blk.0.hc_attn_base.weight", "mtp.0.hc_attn_base" },
++            { "blk.0.hc_attn_fn.weight", "mtp.0.hc_attn_fn" },
++            { "blk.0.hc_attn_scale.weight", "mtp.0.hc_attn_scale" },
++            { "blk.0.hc_ffn_base.weight", "mtp.0.hc_ffn_base" },
++            { "blk.0.hc_ffn_fn.weight", "mtp.0.hc_ffn_fn" },
++            { "blk.0.hc_ffn_scale.weight", "mtp.0.hc_ffn_scale" },
++            { "blk.1.attn_kv.weight", "mtp.1.attn.wkv.weight" },
++            { "blk.1.attn_kv_a_norm.weight", "mtp.1.attn.kv_norm.weight" },
++            { "blk.1.attn_norm.weight", "mtp.1.attn_norm.weight" },
++            { "blk.1.attn_output_a.weight", "mtp.1.attn.wo_a.weight" },
++            { "blk.1.attn_output_b.weight", "mtp.1.attn.wo_b.weight" },
++            { "blk.1.attn_q_a.weight", "mtp.1.attn.wq_a.weight" },
++            { "blk.1.attn_q_a_norm.weight", "mtp.1.attn.q_norm.weight" },
++            { "blk.1.attn_q_b.weight", "mtp.1.attn.wq_b.weight" },
++            { "blk.1.attn_sinks.weight", "mtp.1.attn.attn_sink" },
++            { "blk.1.exp_probs_b.bias", "mtp.1.ffn.gate.bias" },
++            { "blk.1.ffn_down_exps.weight", "mtp.1.ffn.experts.w2.weight" },
++            { "blk.1.ffn_down_shexp.weight", "mtp.1.ffn.shared_experts.w2.weight" },
++            { "blk.1.ffn_gate_exps.weight", "mtp.1.ffn.experts.w1.weight" },
++            { "blk.1.ffn_gate_inp.weight", "mtp.1.ffn.gate.weight" },
++            { "blk.1.ffn_gate_shexp.weight", "mtp.1.ffn.shared_experts.w1.weight" },
++            { "blk.1.ffn_norm.weight", "mtp.1.ffn_norm.weight" },
++            { "blk.1.ffn_up_exps.weight", "mtp.1.ffn.experts.w3.weight" },
++            { "blk.1.ffn_up_shexp.weight", "mtp.1.ffn.shared_experts.w3.weight" },
++            { "blk.1.hc_attn_base.weight", "mtp.1.hc_attn_base" },
++            { "blk.1.hc_attn_fn.weight", "mtp.1.hc_attn_fn" },
++            { "blk.1.hc_attn_scale.weight", "mtp.1.hc_attn_scale" },
++            { "blk.1.hc_ffn_base.weight", "mtp.1.hc_ffn_base" },
++            { "blk.1.hc_ffn_fn.weight", "mtp.1.hc_ffn_fn" },
++            { "blk.1.hc_ffn_scale.weight", "mtp.1.hc_ffn_scale" },
++            { "blk.2.attn_kv.weight", "mtp.2.attn.wkv.weight" },
++            { "blk.2.attn_kv_a_norm.weight", "mtp.2.attn.kv_norm.weight" },
++            { "blk.2.attn_norm.weight", "mtp.2.attn_norm.weight" },
++            { "blk.2.attn_output_a.weight", "mtp.2.attn.wo_a.weight" },
++            { "blk.2.attn_output_b.weight", "mtp.2.attn.wo_b.weight" },
++            { "blk.2.attn_q_a.weight", "mtp.2.attn.wq_a.weight" },
++            { "blk.2.attn_q_a_norm.weight", "mtp.2.attn.q_norm.weight" },
++            { "blk.2.attn_q_b.weight", "mtp.2.attn.wq_b.weight" },
++            { "blk.2.attn_sinks.weight", "mtp.2.attn.attn_sink" },
++            { "blk.2.exp_probs_b.bias", "mtp.2.ffn.gate.bias" },
++            { "blk.2.ffn_down_exps.weight", "mtp.2.ffn.experts.w2.weight" },
++            { "blk.2.ffn_down_shexp.weight", "mtp.2.ffn.shared_experts.w2.weight" },
++            { "blk.2.ffn_gate_exps.weight", "mtp.2.ffn.experts.w1.weight" },
++            { "blk.2.ffn_gate_inp.weight", "mtp.2.ffn.gate.weight" },
++            { "blk.2.ffn_gate_shexp.weight", "mtp.2.ffn.shared_experts.w1.weight" },
++            { "blk.2.ffn_norm.weight", "mtp.2.ffn_norm.weight" },
++            { "blk.2.ffn_up_exps.weight", "mtp.2.ffn.experts.w3.weight" },
++            { "blk.2.ffn_up_shexp.weight", "mtp.2.ffn.shared_experts.w3.weight" },
++            { "blk.2.hc_attn_base.weight", "mtp.2.hc_attn_base" },
++            { "blk.2.hc_attn_fn.weight", "mtp.2.hc_attn_fn" },
++            { "blk.2.hc_attn_scale.weight", "mtp.2.hc_attn_scale" },
++            { "blk.2.hc_ffn_base.weight", "mtp.2.hc_ffn_base" },
++            { "blk.2.hc_ffn_fn.weight", "mtp.2.hc_ffn_fn" },
++            { "blk.2.hc_ffn_scale.weight", "mtp.2.hc_ffn_scale" },
++            { "conf_proj.weight", "mtp.2.confidence_head.proj.weight" },
++            { "enc.output_norm.weight", "mtp.0.main_norm.weight" },
++            { "fc.weight", "mtp.0.main_proj.weight" },
++            { "markov_w1.weight", "mtp.2.markov_head.embed.weight" },
++            { "markov_w2.weight", "mtp.2.markov_head.head.weight" },
++            { "output_norm.weight", "mtp.2.norm.weight" },
++        };
++        for (size_t s = 0; s < side->size(); ++s) {
++            for (const auto & ti : side->shard(s).tensors()) {
++                const auto found = dflash_alias.find(ti.name);
++                if (found != dflash_alias.end()) {
++                    aliases[&ti] = found->second;
++                    src.push_back({ side.get(), &ti });
++                }
++            }
++        }
++        if (aliases.size() != dflash_alias.size()) {
++            e = "unsupported dflash sidecar: expected all 78 audited tensors";
++            return false;
++        }
++        std::fprintf(stderr, "DSpark: using 78 audited dflash tensor aliases\n");
++    }
++    auto canonical = [&](const TensorInfo * t) -> const std::string & {
++        const auto found = aliases.find(t);
++        return found == aliases.end() ? t->name : found->second;
++    };
+     size_t si = 0;
+     const TensorInfo * out = main->find("output.weight", &si);
+     const TensorInfo * te = main->find("token_embd.weight");
+@@ -166,12 +269,12 @@ bool Ds41DSpark::Impl::load(std::string & e) {
+     for (auto & s : src) {
+         int64_t ne[GGML_MAX_DIMS] = { 1, 1, 1, 1 };
+         for (size_t d = 0; d < s.second->shape.size() && d < GGML_MAX_DIMS; ++d) ne[d] = (int64_t) s.second->shape[d];
+-        if (const int sl = sliced(s.second->name)) ne[sl == 1 ? 2 : sl == 2 ? 1 : 0] = (int64_t) keep[(size_t) blk_of(s.second->name)].size();
+-        const ggml_type ty = (xt != GGML_TYPE_COUNT && is_exp(s.second->name)) ? xt : (ggml_type) s.second->type;
++        if (const int sl = sliced(canonical(s.second))) ne[sl == 1 ? 2 : sl == 2 ? 1 : 0] = (int64_t) keep[(size_t) blk_of(canonical(s.second))].size();
++        const ggml_type ty = (xt != GGML_TYPE_COUNT && is_exp(canonical(s.second))) ? xt : (ggml_type) s.second->type;
+         if (ty != (ggml_type) s.second->type && ne[0] % ggml_blck_size(ty)) { e = s.second->name + ": row not a multiple of the block"; return false; }
+         ggml_tensor * t = ggml_new_tensor(wctx, ty, (int) s.second->shape.size(), ne);
+-        ggml_set_name(t, s.second->name.c_str());
+-        w[s.second->name] = t;
++        ggml_set_name(t, canonical(s.second).c_str());
++        w[canonical(s.second)] = t;
+     }
+     wbuf = ggml_backend_alloc_ctx_tensors_from_buft(wctx, ggml_backend_get_default_buffer_type(be));
+     if (!wbuf) { e = "cannot allocate the DSpark weights on the backend"; return false; }
+@@ -193,7 +296,7 @@ bool Ds41DSpark::Impl::load(std::string & e) {
+     bool restored = false;
+     if (use_stash && stash.key == skey && stash.bytes.size() == wsize) {
+         for (auto & s : src) {
+-            ggml_tensor * t = w[s.second->name];
++            ggml_tensor * t = w[canonical(s.second)];
+             const size_t off = (size_t) ((const uint8_t *) t->data - wbase);
+             ggml_backend_tensor_set(t, stash.bytes.data() + off, 0, ggml_nbytes(t));
+             wbytes += ggml_nbytes(t);
+@@ -232,17 +335,17 @@ bool Ds41DSpark::Impl::load(std::string & e) {
+         const GgufModel & m = *s.first;
+         size_t sh = 0;
+         m.find(s.second->name, &sh);
+-        ggml_tensor * t = w[s.second->name];
++        ggml_tensor * t = w[canonical(s.second)];
+         const void * data = m.shard(sh).tensor_data(*s.second);
+         std::vector<uint8_t> kept;   // STRATA_DSPARK_KEEP: the kept experts' / gate rows' source bytes, in order
+-        if (const int sl = sliced(s.second->name)) {
++        if (const int sl = sliced(canonical(s.second))) {
+             const ggml_type st = (ggml_type) s.second->type;
+             const int64_t n0 = (int64_t) s.second->shape[0];
+             const size_t unit = sl == 1 ? ggml_row_size(st, n0) * (size_t) s.second->shape[1]   // one expert
+                               : sl == 2 ? ggml_row_size(st, n0)                                   // one gate row
+                                         : ggml_type_size(st);                                     // one bias value
+             if (sl == 3 && ggml_blck_size(st) != 1) { e = s.second->name + ": quantized gate bias"; return false; }
+-            const auto & k = keep[(size_t) blk_of(s.second->name)];
++            const auto & k = keep[(size_t) blk_of(canonical(s.second))];
+             kept.resize(k.size() * unit);
+             for (size_t i = 0; i < k.size(); ++i) std::memcpy(kept.data() + i * unit, (const uint8_t *) data + (size_t) k[i] * unit, unit);
+             data = kept.data();
+@@ -281,7 +384,7 @@ bool Ds41DSpark::Impl::load(std::string & e) {
+         // joins the thread, so the stash is complete whenever it is read.
+         std::vector<std::pair<ggml_tensor *, size_t>> ts;
+         for (auto & s : src) {
+-            ggml_tensor * t = w[s.second->name];
++            ggml_tensor * t = w[canonical(s.second)];
+             ts.emplace_back(t, (size_t) ((const uint8_t *) t->data - wbase));
+         }
+         stash.key.clear();

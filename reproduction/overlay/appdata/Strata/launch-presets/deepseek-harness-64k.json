@@ -1,0 +1,31 @@
+{
+  "access": "local",
+  "api_key": null,
+  "context": 65536,
+  "created": "2026-10-28 16:26:34.765179",
+  "data_dir": "F:\\STRATA\\data",
+  "drafting": null,
+  "dsv41_package": null,
+  "extra": {
+    "--dspark": "auto"
+  },
+  "family": "deepseek41",
+  "gpu_roles": null,
+  "gpus": null,
+  "kv": null,
+  "last_used": "2026-10-29 10:05:10.752630",
+  "model": "IST-DAS-2.25bpw",
+  "model_path": null,
+  "mtp": null,
+  "name": "DeepSeek-Harness-64K",
+  "no_key": false,
+  "parallel": null,
+  "port": 8080,
+  "schema": "strata.launch/1",
+  "speed": "full",
+  "tune": "skip",
+  "tune_allow_small": false,
+  "tuned_at": null,
+  "tuned_preset": null,
+  "vision": "on"
+}

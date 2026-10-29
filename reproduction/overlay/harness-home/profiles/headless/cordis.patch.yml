@@ -1,0 +1,35 @@
+# Local output tuning: 64K context, 16K output. Preset snapshots match installed dsh 0.2.1-rc.2.
+- id: llm-deepseek
+  config:
+    baseURL: http://127.0.0.1:8080
+    apiKeyEnv: STRATA_LOCAL_API_KEY
+    thinking: enabled
+    reasoningEffort: 'off'
+    maxTokens: 16384
+    models:
+      - id: deepseek-v4.1-flash
+        contextWindow: 65536
+        maxTokens: 16384
+        inputModalities:
+          - text
+          - image
+        imagePixelBudget: low
+    defaultContextWindow: 65536
+- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: deepseek-v4.1-flash
+    reasoningEffort: 'off'
+- id: compaction-basic
+  config:
+    thresholdRatio: 0.75
+    headroomTokens: 4096
+    maxTokens: 2048
+    retainTokens: 8192
+- id: session-log-deepseek
+  config:
+    enabled: false
+- id: llm-deepseek-account
+  disabled: true
+- id: session-title-llm
+  disabled: true

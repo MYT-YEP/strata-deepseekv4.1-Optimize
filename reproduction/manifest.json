@@ -1,0 +1,443 @@
+{
+  "schema": 1,
+  "note": "Curated publicly shared source/config snapshot. Model weights are not included.",
+  "runtime_files": [
+    {
+      "path": "appdata/Strata/launch-presets/deepseek-harness-64k.json",
+      "bytes": 663,
+      "sha256": "7ea99dd5df5cb8f7e85ce4c8846b724136d094cc4947d0871e10a72f8021bb53"
+    },
+    {
+      "path": "appdata/Strata/profiles/launch-deepseek-harness-64k.json",
+      "bytes": 219,
+      "sha256": "710c17375901e3a8c5caae96a3dd4b34b4f078764c7fe700155285ce56d33a80"
+    },
+    {
+      "path": "appdata/Strata/settings.json",
+      "bytes": 120,
+      "sha256": "d40ab989d642e9808b5cfee8960982f76b3e213f1eb1caaada5bb0a48f2be3bd"
+    },
+    {
+      "path": "data/packs/deepseek-v4.1-flash-ist-das-2.25bpw/ds4.txt",
+      "bytes": 1497,
+      "sha256": "41563c75099a49d1f7d37b6a1245e19d8737151219a0325de186ce342c071f4f"
+    },
+    {
+      "path": "data/packs/deepseek-v4.1-flash-ist-das-2.25bpw/engram.bin",
+      "bytes": 517980,
+      "sha256": "08d55d6433f389b14aa115f4ea4eb31d6a2d63df1ae40821f03facf4c2d49142"
+    },
+    {
+      "path": "data/packs/deepseek-v4.1-flash-ist-das-2.25bpw/expert-profile.bin",
+      "bytes": 61440,
+      "sha256": "dcbda01dcdc6db3e830155bcd47aaa50549518ac331453d3fcb8361e134208b1"
+    },
+    {
+      "path": "data/packs/deepseek-v4.1-flash-ist-das-2.25bpw/tensors.txt",
+      "bytes": 3762291,
+      "sha256": "c379cb3911633f5580a0c7354c2a73d0e6950f1027b98b83f69930ca93e8ad60"
+    },
+    {
+      "path": "data/packs/deepseek-v4.1-flash-ist-das-2.25bpw/tokenizer/chat_template.jinja",
+      "bytes": 7570,
+      "sha256": "a0d13b95343580fd55547f14374ee22288277bc7ea8ee3167ed49ce14e01cb49"
+    },
+    {
+      "path": "data/packs/deepseek-v4.1-flash-ist-das-2.25bpw/tokenizer/merges.txt",
+      "bytes": 1632573,
+      "sha256": "47b0b7ca8188ae704a386ba5879d8669ca0321d96d0680f9e14d0379111a4af6"
+    },
+    {
+      "path": "data/packs/deepseek-v4.1-flash-ist-das-2.25bpw/tokenizer/token_type.json",
+      "bytes": 387840,
+      "sha256": "0a61021438e5ce6041133495f18fc360a6587aea748b17d953f552d2119ba51e"
+    },
+    {
+      "path": "data/packs/deepseek-v4.1-flash-ist-das-2.25bpw/tokenizer/tokenizer.json",
+      "bytes": 87,
+      "sha256": "a6a0d02007e358a972197603ce33f7003051524656083f8967293a73d28bb4a8"
+    },
+    {
+      "path": "data/packs/deepseek-v4.1-flash-ist-das-2.25bpw/tokenizer/vocab.json",
+      "bytes": 2730577,
+      "sha256": "2f0bf5b31f4aa191d5d0d78291927a4f28c9ceb498a5e345b97e926c4cb99c1a"
+    },
+    {
+      "path": "fast-mode-manager.py",
+      "bytes": 12645,
+      "sha256": "6910ed71e02ad7642183f1bf50ed65e9d00739b5ae022378d22ff59b6061f272"
+    },
+    {
+      "path": "harness-fast-home/profiles/headless/cordis.patch.yml",
+      "bytes": 865,
+      "sha256": "f99ddf67e393d3d29b0d853a14073b25b48734faa62899f7d3057d7f15588956"
+    },
+    {
+      "path": "harness-fast-home/profiles/headless/cordis.yml",
+      "bytes": 223,
+      "sha256": "c300dcf2ebc5f02062d6591268d29d3db6fe45e0cb138f5467276fe2ba06076e"
+    },
+    {
+      "path": "harness-fast-home/profiles/headless/package.json",
+      "bytes": 213,
+      "sha256": "563c0b6082748a6e93daad51514f01335c51fc9c44f5f88253383f18ac2557b5"
+    },
+    {
+      "path": "harness-fast-home/profiles/headless/pnpm-workspace.yaml",
+      "bytes": 61,
+      "sha256": "ae7c5b68e2f157528e62885804e69e88583897b775e03c86fcbe52feaf498aba"
+    },
+    {
+      "path": "harness-fast-home/profiles/web/cordis.patch.yml",
+      "bytes": 25494,
+      "sha256": "434884f5c4f7baa18a109fba9a483b747c60f25a70e99046c5b71c38a2bfd3ea"
+    },
+    {
+      "path": "harness-fast-home/profiles/web/cordis.yml",
+      "bytes": 223,
+      "sha256": "c300dcf2ebc5f02062d6591268d29d3db6fe45e0cb138f5467276fe2ba06076e"
+    },
+    {
+      "path": "harness-fast-home/profiles/web/package.json",
+      "bytes": 207,
+      "sha256": "210068ddb9ebc4cdf395ebb53020be6ccaaedb917e74dae16296d62394626398"
+    },
+    {
+      "path": "harness-fast-home/profiles/web/pnpm-workspace.yaml",
+      "bytes": 61,
+      "sha256": "ae7c5b68e2f157528e62885804e69e88583897b775e03c86fcbe52feaf498aba"
+    },
+    {
+      "path": "harness-fast-launch.cjs",
+      "bytes": 1190,
+      "sha256": "d2424850549c7ff24a6e924e73cb384f9bbe94c247a4b38d7d8cee251f177bc2"
+    },
+    {
+      "path": "harness-home/profiles/headless/cordis.patch.yml",
+      "bytes": 880,
+      "sha256": "b7f67c978744c5962dd75ade836a9f78b065e843bc12a03b8f54f89b531eed37"
+    },
+    {
+      "path": "harness-home/profiles/headless/cordis.yml",
+      "bytes": 223,
+      "sha256": "c300dcf2ebc5f02062d6591268d29d3db6fe45e0cb138f5467276fe2ba06076e"
+    },
+    {
+      "path": "harness-home/profiles/headless/package.json",
+      "bytes": 213,
+      "sha256": "563c0b6082748a6e93daad51514f01335c51fc9c44f5f88253383f18ac2557b5"
+    },
+    {
+      "path": "harness-home/profiles/headless/pnpm-workspace.yaml",
+      "bytes": 61,
+      "sha256": "ae7c5b68e2f157528e62885804e69e88583897b775e03c86fcbe52feaf498aba"
+    },
+    {
+      "path": "harness-home/profiles/web/cordis.patch.yml",
+      "bytes": 24924,
+      "sha256": "e68451225322c4d0cb581b2f9882ae105dca9e5347f24d95c48d03aa255298aa"
+    },
+    {
+      "path": "harness-home/profiles/web/cordis.yml",
+      "bytes": 223,
+      "sha256": "c300dcf2ebc5f02062d6591268d29d3db6fe45e0cb138f5467276fe2ba06076e"
+    },
+    {
+      "path": "harness-home/profiles/web/package.json",
+      "bytes": 207,
+      "sha256": "210068ddb9ebc4cdf395ebb53020be6ccaaedb917e74dae16296d62394626398"
+    },
+    {
+      "path": "harness-home/profiles/web/pnpm-workspace.yaml",
+      "bytes": 61,
+      "sha256": "ae7c5b68e2f157528e62885804e69e88583897b775e03c86fcbe52feaf498aba"
+    },
+    {
+      "path": "harness-launch.cjs",
+      "bytes": 1158,
+      "sha256": "6b2dc20d1725beb523d1e40ad35a3a468f821bf4837d79156c7fb9fc8a9d7d5b"
+    },
+    {
+      "path": "harness-original.cmd",
+      "bytes": 101,
+      "sha256": "98d7bbc243710a4b8ae4f6438dd103200c057b942a60100ddb2183f55715311d"
+    },
+    {
+      "path": "harness.cmd",
+      "bytes": 108,
+      "sha256": "becbce30950ecf02e36196e37a41c0ac5f37139194e8eddee846bca5acad9b6a"
+    },
+    {
+      "path": "harness/package-lock.json",
+      "bytes": 407662,
+      "sha256": "cd8379c58ce0f275a66f731f86c4e6277d0a2e536981f51fa3d76abc5ace67cf"
+    },
+    {
+      "path": "harness/package.json",
+      "bytes": 66,
+      "sha256": "4cc824f70ecacefa15dc8316b58948860ac7eea0ee87cc31c52eb284f0f48ddc"
+    },
+    {
+      "path": "install/strata-deepseek-v4.1-flash-ist-das-2.25bpw.json",
+      "bytes": 1013,
+      "sha256": "a8b6987cdf52e3c7b7e8a242624b6b0bb41e29e8f56e1ed9bbe87a4a253cfe8f"
+    },
+    {
+      "path": "localappdata/Strata/launch/deepseek-harness-64k.json",
+      "bytes": 1046,
+      "sha256": "f5fa1b4ac5f33f104faff202c65f58a2eaad476a08dfcf9d85e72503555335fe"
+    },
+    {
+      "path": "start-deepseek-for-harness.cmd",
+      "bytes": 303,
+      "sha256": "014516e9ed9fc4feeb8cdf068f894191ebbf51e192bf9560e3bb3b9299558077"
+    },
+    {
+      "path": "start-harness-fast.cmd",
+      "bytes": 121,
+      "sha256": "815663f1143bd415438026af7135f7491d85696aa634da1cbdfa99bdd2a79634"
+    },
+    {
+      "path": "start-harness-fast.ps1",
+      "bytes": 5737,
+      "sha256": "a709b69a6977035ce2f2181e2e193a8ae20b4c7b11edb73522aeaa025be576ce"
+    },
+    {
+      "path": "start-harness-original.cmd",
+      "bytes": 114,
+      "sha256": "c71219e31002d26a8fcfeb766dd8d858cc52cb8585798d675f7ce5643c50f45f"
+    },
+    {
+      "path": "start-harness.cmd",
+      "bytes": 219,
+      "sha256": "30dcd12d9c26a388d3f52a850a6e99620c886da25e015ff96fee67458f714787"
+    },
+    {
+      "path": "start-harness.ps1",
+      "bytes": 4733,
+      "sha256": "b067ba856efc04666ebfb7769903eb36cfafe5f9cb365b6405e6e00c2f581cbc"
+    },
+    {
+      "path": "start-strata.cmd",
+      "bytes": 285,
+      "sha256": "7a2a012ec340f06e1e0cb0fe18140a54a80bb4e87f474805f5d355c2a0c5262b"
+    },
+    {
+      "path": "status-strata.cmd",
+      "bytes": 122,
+      "sha256": "372200233a6ee4eaf14d51784e65b6a1223d2f69997d336a0381352f8ad31c47"
+    },
+    {
+      "path": "stop-harness-fast.cmd",
+      "bytes": 120,
+      "sha256": "ef75e9d5ae133bab29acdf5c363f0acba9e0f00278a004d10a1e54b9bf587a58"
+    },
+    {
+      "path": "stop-harness-fast.ps1",
+      "bytes": 2234,
+      "sha256": "80142607a459aba1d83aa81c9f4cb542c00440fe1232df4c70886569063a5831"
+    },
+    {
+      "path": "stop-harness-original.cmd",
+      "bytes": 113,
+      "sha256": "84652cc720f5fbbd6be02163c903925938db7163e37c05141b85ac01d995e978"
+    },
+    {
+      "path": "stop-harness.cmd",
+      "bytes": 215,
+      "sha256": "997c2381e0b85a550bf1d416d1af60e959e49fd0fdbf2d903f54b75c67cc4f28"
+    },
+    {
+      "path": "stop-harness.ps1",
+      "bytes": 792,
+      "sha256": "8b84011b809012f6f15ae7e3cff3fcc066edfc4f752dd6f9770e6da1b41345cd"
+    },
+    {
+      "path": "stop-strata.cmd",
+      "bytes": 120,
+      "sha256": "96cdafd7d06d1017d877439073eafce282811c873e851c67ee240288867f681b"
+    },
+    {
+      "path": "strata-env.cmd",
+      "bytes": 379,
+      "sha256": "423918754e96657016497c366368f2168af2568e73bfd77c3c9e2838566d3dc5"
+    },
+    {
+      "path": "toolchains/cuda-13.2/install-redist.py",
+      "bytes": 3395,
+      "sha256": "2b5103a9b6577dc2842eadee26acb6a03a973e2bc4a114b1aeeabc4c6234cdaa"
+    },
+    {
+      "path": "toolchains/cuda-13.2/nvidia-redistrib-13.2.0.json",
+      "bytes": 47535,
+      "sha256": "3112cc1b1cb49d867c5136ce707c95f14f4aa5c4db430a3008dd6ab8f53ce2a5"
+    },
+    {
+      "path": "toolchains/node-24.14.0/node_modules/npm/npmrc",
+      "bytes": 23,
+      "sha256": "7766240e8b776a73e171752eefea357293336b1208837cff11dbb20c5a3ba17b"
+    },
+    {
+      "path": "tuning/20tok-goal/bench-fast-profile.cjs",
+      "bytes": 2387,
+      "sha256": "ecbbfbaab0084f5f27705cf039b1b29466e2c99ede9dc99e22c5a370c87b8c24"
+    },
+    {
+      "path": "tuning/20tok-goal/benchmark-quality.py",
+      "bytes": 7019,
+      "sha256": "028d0810a2239dfc3055ec26cbddd0e33e81f56e211714f8708d3de91102cb2b"
+    },
+    {
+      "path": "tuning/20tok-goal/fast-profile-limit-test.py",
+      "bytes": 4279,
+      "sha256": "869fdc00bd190552f51ed01b88d17cea33ab9ad597350a720465fe465fc1c0e0"
+    },
+    {
+      "path": "tuning/20tok-goal/fast-profile-real-test.py",
+      "bytes": 3618,
+      "sha256": "6b3820c72197035a5afb74dc9e9d7c1f32c303670736b85b7858c6d9ce75e796"
+    },
+    {
+      "path": "tuning/20tok-goal/measured-engine-run-selected.py",
+      "bytes": 4919,
+      "sha256": "af4bf90555bdad7acce0950a839f299dc40bd4f654407fbae5a7822b3cae3cdc"
+    },
+    {
+      "path": "tuning/20tok-goal/real-benchmark.py",
+      "bytes": 7618,
+      "sha256": "879ed271d7fc4110a27e63261a3acea70131dd29d7cc24eae55dbd334ace0628"
+    },
+    {
+      "path": "tuning/20tok-goal/restore-original-norestart.cmd",
+      "bytes": 177,
+      "sha256": "4b5994e643814ba3402892317305f156b6228237becb3ddc6c9525a28172fac1"
+    },
+    {
+      "path": "tuning/20tok-goal/selected-live-warm-benchmark.py",
+      "bytes": 9372,
+      "sha256": "42147e23b33d0c147118b7889d921807cfff4fae163d2ede50a699c6eb24b697"
+    },
+    {
+      "path": "tuning/20tok-goal/strata-profile-xolotl-rank.bin",
+      "bytes": 122880,
+      "sha256": "e99e03a965212259daeb8f3e505381e0b16291acc010db3c49d46a2e27b7fd88"
+    },
+    {
+      "path": "tuning/20tok-goal/xolotl-dflash-bias075-full-draft-64k.json",
+      "bytes": 1860,
+      "sha256": "fa825e7e6fe9d4a75ea8f63cd89d7dd0eed57583b020cd071341a2c8ed000346"
+    },
+    {
+      "path": "tuning/20tok-goal/xolotl-dflash-bias075-full-draft-pcie100-64k.json",
+      "bytes": 1860,
+      "sha256": "fa825e7e6fe9d4a75ea8f63cd89d7dd0eed57583b020cd071341a2c8ed000346"
+    },
+    {
+      "path": "tuning/20tok-goal/xolotl-harness-overlay.yml",
+      "bytes": 729,
+      "sha256": "47ee26c9b4fe798f044ac2c61f3975959944f14613c88b628b437db4ca7e96bc"
+    },
+    {
+      "path": "tuning/20tok-goal/xolotl-profile-selected-controller.py",
+      "bytes": 21339,
+      "sha256": "54c459b955c77a94f5d3012bd69bf62ad06937d45ae5890987f4e19fbf6b3fce"
+    },
+    {
+      "path": "tuning/20tok-goal/xolotl-run-controller.py",
+      "bytes": 24951,
+      "sha256": "7733579af22e12cd90bca91d2f8bfdf145ae3094c6884fff255cd080c4590fd9"
+    }
+  ],
+  "model_files": [
+    {
+      "path": "data/models/deepseek-v4.1-flash-IST-DAS-2.25bpw/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS-00001-of-00004.gguf",
+      "bytes": 39535776992,
+      "sha256": "4c65307992ab586c527ca1f6f64062aa96a33b23c02b7fed103f45f75e854798",
+      "provenance": "pinned installer and existing .done record; not rehashed while packaging"
+    },
+    {
+      "path": "data/models/deepseek-v4.1-flash-IST-DAS-2.25bpw/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS-00002-of-00004.gguf",
+      "bytes": 39494617536,
+      "sha256": "933461a974fcccee741bf2f9798201e72ab4aa3f8a952be56f849896ca6ea30e",
+      "provenance": "pinned installer and existing .done record; not rehashed while packaging"
+    },
+    {
+      "path": "data/models/deepseek-v4.1-flash-IST-DAS-2.25bpw/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS-00003-of-00004.gguf",
+      "bytes": 39423838496,
+      "sha256": "bbf91fa346a85ebaf32dd4fd5c456b534d780d381e54f46ac90783a481373240",
+      "provenance": "pinned installer and existing .done record; not rehashed while packaging"
+    },
+    {
+      "path": "data/models/deepseek-v4.1-flash-IST-DAS-2.25bpw/DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XS-00004-of-00004.gguf",
+      "bytes": 36771591232,
+      "sha256": "e5b2f8781fab688cd4bc3bc7a69651b5dbb90ed94965657c6bead8bb4774f3cf",
+      "provenance": "pinned installer and existing .done record; not rehashed while packaging"
+    },
+    {
+      "path": "data/models/deepseek-v4.1-flash-shared/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf",
+      "bytes": 110595290816,
+      "sha256": "eb19f30d368d393784e1fc54fdfaffc427ebb2110bf3762fdf5a8fbb9a2d740a",
+      "provenance": "pinned installer and existing .done record; not rehashed while packaging"
+    },
+    {
+      "path": "data/models/deepseek-v4.1-flash-shared/dspark-DeepSeek-V4.1-Flash-1017-Q8_0.gguf",
+      "bytes": 7976914240,
+      "sha256": "6ba6ac1b331c540691a209e7fc97dec2a24e295acb1e755c84c7d24a4373927a",
+      "provenance": "pinned installer and existing .done record; not rehashed while packaging"
+    },
+    {
+      "path": "data/models/deepseek-v4.1-flash-shared/DeepSeek-V4.1-Flash-1017-UD-Q8_K_XL-00001-of-00009.gguf",
+      "bytes": 5780589,
+      "sha256": "cc15d470afcb030558bbc4d8e2ccd840182e2e95de1a95198138efe63a5fd99f",
+      "provenance": "pinned installer and existing .done record; not rehashed while packaging"
+    },
+    {
+      "path": "data/models/deepseek-v4.1-flash-shared/mmproj-BF16.gguf",
+      "bytes": 972208288,
+      "sha256": "9a1ef7c40d0d702c7ed8c5f863f60abae64091387ba3fce0ad19ce9beeda3bf9",
+      "provenance": "pinned installer and existing .done record; not rehashed while packaging"
+    }
+  ],
+  "model_hash_note": "Expected hashes come from pinned installer and pre-existing .done records; model contents were not rehashed during bundle creation.",
+  "git": [
+    {
+      "repository": "F:\\STRATA\\research\\Xolotl",
+      "commit": "684e3c0693cdb1d928aea525175ef30df9f6ec84",
+      "changed_files": [
+        "tools/v41/engine/ds41_dspark.cpp"
+      ],
+      "patch": "patches/xolotl-local-dspark.patch",
+      "patch_sha256": "6f463f5c2d3835bb10b6548814fa5bd15448b0b8f10a05f33568c1a7e646fe2c",
+      "base_apply_and_comparison": "passed"
+    },
+    {
+      "repository": "F:\\STRATA\\research\\Xolotl\\third_party\\llama.cpp",
+      "commit": "6050b467c07a95c7b87debd4ddac2f8ba8d9b807",
+      "changed_files": [
+        "ggml/include/ggml-cuda.h",
+        "ggml/include/ggml.h",
+        "ggml/src/ggml-backend-meta.cpp",
+        "ggml/src/ggml-cpu/ggml-cpu.c",
+        "ggml/src/ggml-cpu/ops.cpp",
+        "ggml/src/ggml-cpu/ops.h",
+        "ggml/src/ggml-cuda/argsort.cu",
+        "ggml/src/ggml-cuda/common.cuh",
+        "ggml/src/ggml-cuda/cpy-utils.cuh",
+        "ggml/src/ggml-cuda/dequantize.cuh",
+        "ggml/src/ggml-cuda/dsv4-hc.cu",
+        "ggml/src/ggml-cuda/dsv4-hc.cuh",
+        "ggml/src/ggml-cuda/fattn-common.cuh",
+        "ggml/src/ggml-cuda/getrows.cu",
+        "ggml/src/ggml-cuda/ggml-cuda.cu",
+        "ggml/src/ggml-cuda/lightning-indexer.cu",
+        "ggml/src/ggml-cuda/mmq.cuh",
+        "ggml/src/ggml-cuda/set-rows.cu",
+        "ggml/src/ggml-vulkan/ggml-vulkan.cpp",
+        "ggml/src/ggml.c"
+      ],
+      "patch": "patches/llama-ggml.patch",
+      "patch_sha256": "30ede2dac71395ee236987ba8ddb735bc9e82894d694f2601c44be709e8add5e",
+      "base_apply_and_comparison": "passed"
+    }
+  ]
+}

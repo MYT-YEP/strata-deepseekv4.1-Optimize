@@ -1,0 +1,194 @@
+{
+  "runs": [
+    {
+      "variant": "baseline",
+      "run_id": "20261029-094300-8520",
+      "model_load_seconds": 51.665,
+      "rows": [
+        {
+          "case": "zh_privacy",
+          "output_tokens": 299,
+          "decode_seconds": 23.5854,
+          "decode_tps": 12.7,
+          "first_text_seconds": 8.027,
+          "elapsed_seconds": 31.613,
+          "finish_reason": "stop",
+          "python_syntax_valid": null,
+          "answer_sha256": "4fe81b18d939293eee19823eb1302dc64e8e009509a3683c860914eca3000b5c"
+        },
+        {
+          "case": "python_unique",
+          "output_tokens": 424,
+          "decode_seconds": 19.9693,
+          "decode_tps": 21.2,
+          "first_text_seconds": 6.159,
+          "elapsed_seconds": 26.128,
+          "finish_reason": "stop",
+          "python_syntax_valid": true,
+          "answer_sha256": "29169608e36a4282712591cb3a34821e29653bbfdcc0c90aa503baa0faef5d62"
+        },
+        {
+          "case": "en_backpressure",
+          "output_tokens": 373,
+          "decode_seconds": 27.9228,
+          "decode_tps": 13.4,
+          "first_text_seconds": 6.885,
+          "elapsed_seconds": 34.808,
+          "finish_reason": "stop",
+          "python_syntax_valid": null,
+          "answer_sha256": "c457ad662ea5126eb53f4cca02246e4f9dd7a9f646b404c97ae8b372eaff2ddf"
+        },
+        {
+          "case": "zh_backup",
+          "output_tokens": 634,
+          "decode_seconds": 42.0108,
+          "decode_tps": 15.1,
+          "first_text_seconds": 5.583,
+          "elapsed_seconds": 47.595,
+          "finish_reason": "stop",
+          "python_syntax_valid": null,
+          "answer_sha256": "a87f083084a30420a6c4692862a0f652a9b0de4214a1de355058328b654797fa"
+        },
+        {
+          "case": "python_intervals",
+          "output_tokens": 768,
+          "decode_seconds": 24.4505,
+          "decode_tps": 31.4,
+          "first_text_seconds": 6.275,
+          "elapsed_seconds": 30.726,
+          "finish_reason": "length",
+          "python_syntax_valid": true,
+          "answer_sha256": "e619b4a675e248ace254b02ae8336b69beef6ef21dcc6168079e576eb7b5dabb"
+        },
+        {
+          "case": "en_atomic",
+          "output_tokens": 428,
+          "decode_seconds": 24.549599999999998,
+          "decode_tps": 17.4,
+          "first_text_seconds": 6.307,
+          "elapsed_seconds": 30.857,
+          "finish_reason": "stop",
+          "python_syntax_valid": null,
+          "answer_sha256": "a3866b2256a075659e543e62a4b75c62b5b768338ef06af5002b7ae372350d55"
+        }
+      ],
+      "totals": {
+        "output_tokens": 2926,
+        "decode_seconds": 162.4884,
+        "elapsed_seconds": 201.727,
+        "weighted_decode_tps": 18.007,
+        "end_to_end_output_tps": 14.505
+      },
+      "graph_cache_drops": 3,
+      "dma_enabled_log": false,
+      "last_prof_x": [
+        "[prof_x] 56320 calls, ms/call: classify 0.011 xq 0.021 launch 0.647 jobs+reads 0.002 pool 0.055 sum+sync 1.124 admit 0.000 | distinct 9.12/call, cpu 0.11, file 0.00",
+        "[prof_x] pool since last: gu 10.8 ms, q 0.1 ms, down 4.4 ms, 402.4 MB -> 26.35 GB/s"
+      ],
+      "telemetry": {
+        "samples": 65,
+        "gpu_samples": 65,
+        "gpu_temp_max_c": 51.0,
+        "gpu_graphics_clock_median_mhz": 2895.0,
+        "gpu_power_median_w": 170.69,
+        "gpu_memory_max_mib": 23793.0,
+        "available_gib_min": 6.485
+      },
+      "meta": "F:\\STRATA\\tuning\\20tok-goal\\measured-baseline-20261029-094258-31708-result.json"
+    },
+    {
+      "variant": "selected",
+      "run_id": "20261029-095107-42904",
+      "model_load_seconds": 51.674,
+      "rows": [
+        {
+          "case": "zh_privacy",
+          "output_tokens": 383,
+          "decode_seconds": 40.6865,
+          "decode_tps": 9.4,
+          "first_text_seconds": 8.1,
+          "elapsed_seconds": 48.787,
+          "finish_reason": "stop",
+          "python_syntax_valid": null,
+          "answer_sha256": "839cd7d4c068d771562ae5d36ff7bcc85169e1f167b2cb899768d61e10a18952"
+        },
+        {
+          "case": "python_unique",
+          "output_tokens": 435,
+          "decode_seconds": 35.832699999999996,
+          "decode_tps": 12.1,
+          "first_text_seconds": 6.247,
+          "elapsed_seconds": 42.081,
+          "finish_reason": "stop",
+          "python_syntax_valid": true,
+          "answer_sha256": "9ad156c9ebf57e12db1dbe69c7c9061c0cdd4cc7045b0d6e52afca0f57fbc8d7"
+        },
+        {
+          "case": "en_backpressure",
+          "output_tokens": 382,
+          "decode_seconds": 25.8,
+          "decode_tps": 14.8,
+          "first_text_seconds": 6.529,
+          "elapsed_seconds": 32.33,
+          "finish_reason": "stop",
+          "python_syntax_valid": null,
+          "answer_sha256": "7b7319d067a9d9a25b4f28bb3bd5b1d05dfd4090f74fd1f6423fc9def4c151bf"
+        },
+        {
+          "case": "zh_backup",
+          "output_tokens": 531,
+          "decode_seconds": 30.137900000000002,
+          "decode_tps": 17.6,
+          "first_text_seconds": 5.465,
+          "elapsed_seconds": 35.603,
+          "finish_reason": "stop",
+          "python_syntax_valid": null,
+          "answer_sha256": "9bf86bdea296b73fa355837476878e0852f41b26ab61ccce8b630e1f10ae8b5d"
+        },
+        {
+          "case": "python_intervals",
+          "output_tokens": 541,
+          "decode_seconds": 22.102400000000003,
+          "decode_tps": 24.5,
+          "first_text_seconds": 6.225,
+          "elapsed_seconds": 28.328,
+          "finish_reason": "stop",
+          "python_syntax_valid": true,
+          "answer_sha256": "504428826da682b6f901f161be11bbbeb18fce352d57c08beb2c31aaa18141d9"
+        },
+        {
+          "case": "en_atomic",
+          "output_tokens": 557,
+          "decode_seconds": 35.2797,
+          "decode_tps": 15.8,
+          "first_text_seconds": 6.074,
+          "elapsed_seconds": 41.354,
+          "finish_reason": "stop",
+          "python_syntax_valid": null,
+          "answer_sha256": "0b9e89b7c6e673da8a99a0eec856507fa8a54bde77c88c0261f5a2e8e568ed2c"
+        }
+      ],
+      "totals": {
+        "output_tokens": 2829,
+        "decode_seconds": 189.8392,
+        "elapsed_seconds": 228.483,
+        "weighted_decode_tps": 14.902,
+        "end_to_end_output_tps": 12.382
+      },
+      "graph_cache_drops": 3,
+      "dma_enabled_log": false,
+      "last_prof_x": [],
+      "telemetry": {
+        "samples": 74,
+        "gpu_samples": 74,
+        "gpu_temp_max_c": 51.0,
+        "gpu_graphics_clock_median_mhz": 2895.0,
+        "gpu_power_median_w": 167.52499999999998,
+        "gpu_memory_max_mib": 23782.0,
+        "available_gib_min": 6.864
+      },
+      "meta": "F:\\STRATA\\tuning\\20tok-goal\\measured-selected-20261029-095104-30248-result.json"
+    }
+  ],
+  "note": "Sampled hardware telemetry and answers vary across runs; these are not controlled laboratory measurements."
+}
